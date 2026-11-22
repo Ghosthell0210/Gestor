@@ -9,7 +9,9 @@ import {
   Server,
   Terminal,
   ShieldCheck,
+  Search,
 } from 'lucide-react';
+import { BUILTIN_COMMANDS, type CommandCategory } from '../shared/commandsCatalog.ts';
 import type { BotRuntimeInfo, CustomCommand } from '../shared/types.ts';
 
 interface CommandsAltarePanelProps {
@@ -32,6 +34,8 @@ export const CommandsAltarePanel: React.FC<CommandsAltarePanelProps> = ({
   const [deleteTrigger, setDeleteTrigger] = useState(false);
   const [saving, setSaving] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [catFilter, setCatFilter] = useState<'all' | CommandCategory>('all');
+  const [cmdSearch, setCmdSearch] = useState('');
 
   useEffect(() => {
     setDraft(commands);
@@ -76,8 +80,105 @@ export const CommandsAltarePanel: React.FC<CommandsAltarePanelProps> = ({
     setTimeout(() => setCopiedKey(null), 1500);
   };
 
+  const filteredBuiltins = BUILTIN_COMMANDS.filter((c) => {
+    if (catFilter !== 'all' && c.category !== catFilter) return false;
+    const q = cmdSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      c.command.toLowerCase().includes(q) ||
+      c.usage.toLowerCase().includes(q) ||
+      c.description.toLowerCase().includes(q)
+    );
+  });
+
   return (
     <div className="space-y-8">
+      {/* Built-in Telegram Menu Commands Catalog */}
+      <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="p-5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">
+              Comandos Preconfigurados (Menú / de Telegram)
+            </h2>
+            <p className="text-sm text-slate-500 mt-0.5">
+              El bot registra estos {BUILTIN_COMMANDS.length} comandos automáticamente en Telegram al iniciar (sin configurar <span className="font-mono">@BotFather</span> manualmente).
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex border border-slate-200 rounded-md overflow-hidden bg-slate-50">
+              {(
+                [
+                  { id: 'all', label: 'Todos' },
+                  { id: 'grupo', label: 'Grupo' },
+                  { id: 'entretenimiento', label: 'Juegos' },
+                  { id: 'admin', label: 'Admin' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setCatFilter(tab.id)}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
+                    catFilter === tab.id
+                      ? 'bg-slate-900 text-white'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={cmdSearch}
+                onChange={(e) => setCmdSearch(e.target.value)}
+                placeholder="Buscar comando..."
+                className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-md bg-white text-slate-900 placeholder:text-slate-400"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="max-h-96 overflow-y-auto divide-y divide-slate-100">
+          {filteredBuiltins.map((item) => (
+            <div
+              key={item.command}
+              className="px-5 py-3 flex flex-wrap items-center justify-between gap-3 text-xs hover:bg-slate-50/70"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-semibold text-sky-700">{item.usage}</span>
+                  <span className="text-slate-400" aria-hidden="true">·</span>
+                  <span className="text-slate-500">
+                    {item.adminOnly ? 'Solo Administradores' : 'Todos los miembros'}
+                  </span>
+                </div>
+                <p className="text-slate-600">{item.description}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => copyText(`builtin-${item.command}`, `/${item.command}`)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-mono text-slate-600 bg-slate-100 hover:bg-slate-200 rounded transition-colors shrink-0"
+              >
+                {copiedKey === `builtin-${item.command}` ? (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-600" />
+                    Copiado
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    /{item.command}
+                  </>
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* Custom Commands Section */}
       <section className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4">

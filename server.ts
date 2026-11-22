@@ -364,6 +364,7 @@ async function bootstrap() {
       severity: 'info',
     });
     await store.save();
+    await telegramAdapter.syncTelegramCommands();
     res.json({ database: db, runtime: telegramAdapter.getRuntimeInfo() });
   });
 

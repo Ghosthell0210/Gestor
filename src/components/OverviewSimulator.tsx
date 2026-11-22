@@ -12,7 +12,10 @@ import {
   CheckCircle2,
   AlertTriangle,
   Siren,
+  Terminal,
+  X,
 } from 'lucide-react';
+import { BUILTIN_COMMANDS } from '../shared/commandsCatalog.ts';
 import type {
   BotDatabase,
   BotRuntimeInfo,
@@ -68,8 +71,10 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
 
   const [joinName, setJoinName] = useState('Sofía Herrera');
   const [joinUsername, setJoinUsername] = useState('sofia_h');
+  const [showCommandsMenu, setShowCommandsMenu] = useState(false);
 
   const feedEndRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!db.members.some((m) => m.id === actorId) && db.members[0]) {
@@ -96,9 +101,45 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
       await onSendMessage(activeActor.id, payloadText, contentType);
       setText('');
       setContentType('text');
+      setShowCommandsMenu(false);
     } finally {
       setBusy(false);
     }
+  };
+
+  const isTypingSlash = text.startsWith('/') && !text.includes(' ');
+  const slashQuery = isTypingSlash ? text.slice(1).toLowerCase() : '';
+  const allAvailableCommands = [
+    ...BUILTIN_COMMANDS.map((c) => ({
+      trigger: `/${c.command}`,
+      usage: c.usage,
+      description: c.description,
+      categoryLabel: c.adminOnly ? 'Admin' : c.category === 'grupo' ? 'Grupo' : 'Juego',
+      adminOnly: c.adminOnly,
+    })),
+    ...db.customCommands
+      .filter((c) => c.enabled)
+      .map((c) => ({
+        trigger: c.trigger,
+        usage: c.trigger,
+        description: c.response.slice(0, 90),
+        categoryLabel: c.adminOnly ? 'Personalizado · Admin' : 'Personalizado',
+        adminOnly: c.adminOnly,
+      })),
+  ];
+  const filteredCommands = allAvailableCommands.filter((item) => {
+    if (!slashQuery) return true;
+    return (
+      item.trigger.toLowerCase().includes(slashQuery) ||
+      item.description.toLowerCase().includes(slashQuery)
+    );
+  });
+  const commandsPopoverOpen = showCommandsMenu || isTypingSlash;
+
+  const insertCommand = (trigger: string) => {
+    setText(`${trigger} `);
+    setShowCommandsMenu(false);
+    setTimeout(() => inputRef.current?.focus(), 0);
   };
 
   const handleTriggerFlood = async () => {
@@ -358,7 +399,48 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
             <div ref={feedEndRef} />
           </div>
 
-          <form onSubmit={handleSubmit} className="p-4 border-t border-slate-200 bg-white space-y-3">
+          <form onSubmit={handleSubmit} className="relative p-4 border-t border-slate-200 bg-white space-y-3">
+            {commandsPopoverOpen && filteredCommands.length > 0 && (
+              <div className="absolute left-4 right-4 bottom-full mb-2 bg-white border border-slate-200 rounded-lg shadow-lg z-20 overflow-hidden">
+                <div className="px-3.5 py-2 border-b border-slate-200 bg-slate-50 flex items-center justify-between text-xs">
+                  <span className="font-semibold text-slate-800">
+                    Menú de comandos preconfigurados ({filteredCommands.length})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCommandsMenu(false);
+                      if (isTypingSlash) setText('');
+                    }}
+                    className="text-slate-400 hover:text-slate-700"
+                    aria-label="Cerrar menú de comandos"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="max-h-56 overflow-y-auto divide-y divide-slate-100">
+                  {filteredCommands.map((cmd) => (
+                    <button
+                      key={cmd.trigger}
+                      type="button"
+                      onClick={() => insertCommand(cmd.trigger)}
+                      className="w-full px-3.5 py-2 text-left hover:bg-sky-50 flex items-baseline justify-between gap-3 transition-colors"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-mono text-xs font-semibold text-sky-700">
+                          {cmd.usage}
+                        </span>
+                        <p className="text-xs text-slate-600 truncate">{cmd.description}</p>
+                      </div>
+                      <span className="text-[11px] text-slate-500 shrink-0 font-medium">
+                        {cmd.categoryLabel}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-2">
               <label className="text-xs font-medium text-slate-600 shrink-0" htmlFor="sim-actor">
                 Actuar como:
@@ -388,14 +470,28 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
                   </option>
                 ))}
               </select>
+
+              <button
+                type="button"
+                onClick={() => setShowCommandsMenu((prev) => !prev)}
+                className={`ml-auto inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border rounded-md transition-colors whitespace-nowrap ${
+                  commandsPopoverOpen
+                    ? 'border-sky-300 bg-sky-50 text-sky-700'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <Terminal className="w-3.5 h-3.5" />
+                Comandos (/)
+              </button>
             </div>
 
             <div className="flex items-center gap-2">
               <input
+                ref={inputRef}
                 type="text"
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                placeholder="Escribe un mensaje, comando (/trivia, /ahorcado, /daily, /shop, /warn) o letra..."
+                placeholder="Escribe / para ver todos los comandos o envía un mensaje..."
                 className="flex-1 min-w-0 text-sm border border-slate-200 rounded-md px-3.5 py-2 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <button

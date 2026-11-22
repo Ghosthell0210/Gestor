@@ -806,9 +806,10 @@ class EntertainmentEngine {
         };
       }
 
-      case '/8ball': {
+      case '/8ball':
+      case '/bola8': {
         const q = args.join(' ').trim();
-        if (!q) return { handled: true, replyText: 'Uso: /8ball <tu pregunta>' };
+        if (!q) return { handled: true, replyText: 'Uso: /bola8 <tu pregunta>' };
         const answers = [
           'Sí, totalmente seguro.',
           'Todo apunta a que sí.',

@@ -4,6 +4,7 @@ import { botEngine, escapeHtml } from './engine.ts';
 import type { BotEffect } from './engine.ts';
 import { entertainmentEngine } from './entertainment.ts';
 import { store } from './storage.ts';
+import { buildTelegramCommandScopes } from '../shared/commandsCatalog.ts';
 import type { BotRuntimeInfo, MessageContentType } from '../shared/types.ts';
 
 function parseAdminIds(): Set<string> {
@@ -236,6 +237,8 @@ class TelegramLongPollingAdapter {
       this.telegramConnected = true;
       this.lastError = null;
 
+      await this.syncTelegramCommands();
+
       bot.start({
         drop_pending_updates: true,
         allowed_updates: ['message', 'callback_query', 'chat_join_request'],
@@ -243,6 +246,18 @@ class TelegramLongPollingAdapter {
     } catch (err) {
       this.telegramConnected = false;
       this.lastError = err instanceof Error ? err.message : 'No se pudo conectar con Telegram Bot API';
+    }
+  }
+
+  async syncTelegramCommands(): Promise<void> {
+    if (!this.bot || !this.telegramConnected) return;
+    try {
+      const { memberCommands, adminCommands } = buildTelegramCommandScopes(store.get().customCommands);
+      await this.bot.api.setMyCommands(memberCommands);
+      await this.bot.api.setMyCommands(memberCommands, { scope: { type: 'all_group_chats' } });
+      await this.bot.api.setMyCommands(adminCommands, { scope: { type: 'all_chat_administrators' } });
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : 'No se pudo sincronizar el menú de comandos';
     }
   }
 

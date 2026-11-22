@@ -1,7 +1,11 @@
 import JSZip from 'jszip';
 import { store } from './storage.ts';
+import { buildTelegramCommandScopes } from '../shared/commandsCatalog.ts';
 
 function generateStandaloneBotJs(): string {
+  const baseScopes = buildTelegramCommandScopes([]);
+  const memberJson = JSON.stringify(baseScopes.memberCommands);
+  const adminJson = JSON.stringify(baseScopes.adminCommands);
   return `import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -188,11 +192,52 @@ function checkGameCooldown(member, isAdmin) {
 }
 
 const URL_REGEX = /(?:https?:\\/\\/|www\\.|t\\.me\\/|telegram\\.me\\/)([^\\s/$.?#].[^\\s]*)/gi;
+const BASE_MEMBER_COMMANDS = ${memberJson};
+const BASE_ADMIN_COMMANDS = ${adminJson};
+const MAGIC_8_BALL = [
+  'Sí, totalmente seguro.',
+  'Todo apunta a que sí.',
+  'Probablemente sí, pero ten cautela.',
+  'Difícil de predecir ahora mismo.',
+  'Pregunta de nuevo más tarde.',
+  'Mejor no contar con ello.',
+  'Las señales dicen que no.',
+];
 const bot = new Bot(TOKEN);
 
 bot.catch((err) => {
   console.error('Error en bot:', err.error);
 });
+
+async function registerTelegramCommands() {
+  try {
+    const validCmd = /^[a-z][a-z0-9_]{0,31}$/;
+    const memberCmds = [...BASE_MEMBER_COMMANDS];
+    const adminCmds = [...BASE_ADMIN_COMMANDS];
+    const seenM = new Set(memberCmds.map((c) => c.command));
+    const seenA = new Set(adminCmds.map((c) => c.command));
+    for (const custom of db.customCommands || []) {
+      if (!custom.enabled || !custom.trigger || !custom.trigger.startsWith('/')) continue;
+      const clean = custom.trigger.slice(1).toLowerCase();
+      if (!validCmd.test(clean)) continue;
+      const desc = 'Comando personalizado: ' + String(custom.response || '').replace(/\\s+/g, ' ').slice(0, 80);
+      if (!custom.adminOnly && !seenM.has(clean)) {
+        seenM.add(clean);
+        memberCmds.push({ command: clean, description: desc });
+      }
+      if (!seenA.has(clean)) {
+        seenA.add(clean);
+        adminCmds.push({ command: clean, description: desc });
+      }
+    }
+    await bot.api.setMyCommands(memberCmds.slice(0, 100));
+    await bot.api.setMyCommands(memberCmds.slice(0, 100), { scope: { type: 'all_group_chats' } });
+    await bot.api.setMyCommands(adminCmds.slice(0, 100), { scope: { type: 'all_chat_administrators' } });
+    console.log('Menú de comandos / registrado en Telegram (' + adminCmds.length + ' comandos).');
+  } catch (err) {
+    console.warn('No se pudo registrar el menú de comandos:', err?.message || err);
+  }
+}
 
 bot.on('chat_join_request', async (ctx) => {
   const user = ctx.chatJoinRequest.from;
@@ -536,7 +581,36 @@ bot.on('message', async (ctx) => {
     if (cmd === '/rules') {
       await ctx.reply(escapeHtml(db.settings.rulesText), { parse_mode: 'HTML' });
     } else if (cmd === '/help' || cmd === '/start') {
-      await ctx.reply('Grupo: /rules, /info, /report | Juegos: /rank, /top, /daily, /misiones, /gracias, /shop, /buy, /cofre, /trivia, /ahorcado, /calculo, /dado, /ruleta, /ppt, /duelo, /lluvia, /encuesta' + (isAdmin ? ' | Admin: /warn, /mute, /unmute, /kick, /ban, /lock, /unlock, /raid, /slowmode, /games, /sorteo, /fin_sorteo' : ''));
+      const mList = 'Grupo: /rules, /info, /staff, /warns, /report\\nEntretenimiento: /rank, /top, /daily, /misiones, /gracias, /pay, /shop, /buy, /cofre, /trivia, /ahorcado, /calculo, /dado, /ruleta, /ppt, /duelo, /lluvia, /encuesta, /bola8, /ship';
+      const aList = isAdmin ? '\\nAdmin: /warn, /unwarn, /mute, /unmute, /kick, /ban, /unban, /vip, /unvip, /lock, /unlock, /purge, /pin, /unpin, /setrules, /setwelcome, /raid, /slowmode, /games, /sorteo, /fin_sorteo' : '';
+      await ctx.reply(escapeHtml(mList + aList), { parse_mode: 'HTML' });
+    } else if (cmd === '/info') {
+      const t = args[0] || ctx.message.reply_to_message?.from ? resolveMember(args[0], ctx.message.reply_to_message?.from) : member;
+      if (!t) return ctx.reply('Usuario no encontrado.');
+      await ctx.reply(escapeHtml(\`\${t.name} (@\${t.username}) · Rol: \${t.role.toUpperCase()} · Nv.\${t.level} (\${t.xp} XP) · \${t.coins} \${currency} · Warns: \${t.warns}/\${db.automod.maxWarns}\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/staff') {
+      const admins = db.members.filter((m) => m.role === 'admin').map((m) => '@' + m.username);
+      const vips = db.members.filter((m) => m.role === 'vip').map((m) => '@' + m.username);
+      await ctx.reply(escapeHtml(\`Admins: \${admins.join(', ') || 'Sin asignar'}\\nVIPs: \${vips.join(', ') || 'Ninguno'}\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/warns') {
+      const t = args[0] || ctx.message.reply_to_message?.from ? resolveMember(args[0], ctx.message.reply_to_message?.from) : member;
+      if (!t) return ctx.reply('Usuario no encontrado.');
+      await ctx.reply(escapeHtml(\`@\${t.username} tiene \${t.warns}/\${db.automod.maxWarns} advertencias.\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/report') {
+      const reason = args.join(' ').trim() || 'Solicitud de revisión';
+      await ctx.reply(escapeHtml(\`Reporte enviado por @\${member.username}: "\${reason}".\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/setrules' && isAdmin) {
+      const nextRules = args.join(' ').trim();
+      if (!nextRules) return ctx.reply('Uso: /setrules <texto>');
+      db.settings.rulesText = nextRules;
+      await flushDbNow();
+      await ctx.reply('Normas actualizadas.');
+    } else if (cmd === '/setwelcome' && isAdmin) {
+      const nextWelcome = args.join(' ').trim();
+      if (!nextWelcome) return ctx.reply('Uso: /setwelcome <texto>');
+      db.settings.welcomeMessage = nextWelcome;
+      await flushDbNow();
+      await ctx.reply('Bienvenida actualizada.');
     } else if (cmd === '/raid' && isAdmin) {
       const m = (args[0] || '').toLowerCase();
       if (m === 'on' || m === 'off') {
@@ -544,6 +618,8 @@ bot.on('message', async (ctx) => {
         if (db.security.raidAction === 'lock_all') db.automod.locks.all = m === 'on';
         await flushDbNow();
         await ctx.reply('Modo Anti-Raid: ' + (db.security.raidModeActive ? 'ACTIVO' : 'Inactivo'));
+      } else {
+        await ctx.reply('Uso: /raid on | off');
       }
     } else if (cmd === '/slowmode' && isAdmin) {
       db.security.slowModeSec = Math.max(0, Math.min(300, Number.parseInt(args[0] || '0', 10) || 0));
@@ -555,6 +631,8 @@ bot.on('message', async (ctx) => {
         db.entertainment.gamesEnabled = m === 'on';
         await flushDbNow();
         await ctx.reply('Juegos ' + (db.entertainment.gamesEnabled ? 'activados' : 'pausados'));
+      } else {
+        await ctx.reply('Uso: /games on | off');
       }
     } else if (cmd === '/rank' || cmd === '/perfil' || cmd === '/balance') {
       await ctx.reply(escapeHtml(\`@\${member.username} · Nivel \${member.level} (\${member.xp} XP) · \${member.coins} \${currency} · +\${member.reputation} rep\`), { parse_mode: 'HTML' });
@@ -586,6 +664,14 @@ bot.on('message', async (ctx) => {
       target.reputation += 1; target.coins += 15; member.dailyMissions.repGiven += 1;
       await flushDbNow();
       await ctx.reply(escapeHtml(\`@\${member.username} dio +1 Rep a @\${target.username}.\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/pay') {
+      const target = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      const amt = Number.parseInt((ctx.message.reply_to_message?.from ? args[0] : args[1]) || '0', 10) || 0;
+      if (!target || target.id === member.id || amt <= 0) return ctx.reply('Uso: /pay @usuario <cantidad>');
+      if (member.coins < amt) return ctx.reply('Saldo insuficiente.');
+      member.coins -= amt; target.coins += amt;
+      await flushDbNow();
+      await ctx.reply(escapeHtml(\`@\${member.username} transfirió \${amt} \${currency} a @\${target.username}.\`), { parse_mode: 'HTML' });
     } else if (cmd === '/shop') {
       const items = db.entertainment.shopItems.filter((i) => i.enabled);
       await ctx.reply(escapeHtml(items.map((i, idx) => \`\${idx + 1}. \${i.title} (\${i.price} \${currency})\`).join('\\n') || 'Tienda vacía.'), { parse_mode: 'HTML' });
@@ -671,6 +757,16 @@ bot.on('message', async (ctx) => {
       db.entertainment.activeCoinRains.push({ id: rainId, totalCoins: total, remainingCoins: total, maxClaims, claimedBy: [], createdBy: '@' + member.username });
       await flushDbNow();
       await ctx.reply(escapeHtml(\`¡Lluvia de \${total} \${currency} por @\${member.username}!\`), { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('Reclamar parte', 'rain:' + rainId) });
+    } else if (cmd === '/bola8' || cmd === '/8ball') {
+      const q = args.join(' ').trim();
+      if (!q) return ctx.reply('Uso: /bola8 <pregunta>');
+      const ans = MAGIC_8_BALL[crypto.randomInt(0, MAGIC_8_BALL.length)];
+      await ctx.reply(escapeHtml(\`Bola 8: "\${q}" -> \${ans}\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/ship') {
+      const a = args[0] || '@' + member.username;
+      const b = args[1] || '@grupo';
+      const pct = crypto.randomInt(15, 101);
+      await ctx.reply(escapeHtml(\`Compatibilidad entre \${a} y \${b}: \${pct}%\`), { parse_mode: 'HTML' });
     } else if (cmd === '/sorteo' && isAdmin) {
       const mins = Math.max(1, Number.parseInt(args[0] || '10', 10) || 10);
       const winnersCount = Math.max(1, Number.parseInt(args[1] || '1', 10) || 1);
@@ -679,6 +775,20 @@ bot.on('message', async (ctx) => {
       db.entertainment.activeGiveaways.push({ id: gid, prize, winnersCount, endsAt: new Date(now + mins * 60000).toISOString(), participants: [], winnerIds: [], status: 'active', createdBy: '@' + member.username });
       await flushDbNow();
       await ctx.reply(escapeHtml(\`SORTEO: \${prize} (\${winnersCount} ganador/es, \${mins}m)\`), { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('Participar', 'giveaway:' + gid) });
+    } else if (cmd === '/fin_sorteo' && isAdmin) {
+      const active = db.entertainment.activeGiveaways.find((g) => g.status === 'active');
+      if (!active) return ctx.reply('No hay sorteos activos.');
+      active.status = 'ended';
+      const pool = [...active.participants];
+      const winners = [];
+      while (winners.length < active.winnersCount && pool.length > 0) {
+        const idx = crypto.randomInt(0, pool.length);
+        winners.push(pool.splice(idx, 1)[0]);
+      }
+      active.winnerIds = winners;
+      await flushDbNow();
+      const names = winners.map((id) => { const m = db.members.find((x) => x.id === id); return m ? '@' + m.username : id; });
+      await ctx.reply(escapeHtml(names.length ? \`Sorteo "\${active.prize}" finalizado. Ganadores: \${names.join(', ')}\` : \`Sorteo "\${active.prize}" cerrado sin participantes.\`), { parse_mode: 'HTML' });
     } else if (cmd === '/encuesta') {
       const parts = args.join(' ').split('|').map((s) => s.trim()).filter(Boolean);
       if (parts.length < 3) return ctx.reply('Uso: /encuesta Pregunta | Op1 | Op2');
@@ -689,26 +799,78 @@ bot.on('message', async (ctx) => {
       opts.forEach((o, i) => kb.text(o, \`poll:\${pid}:\${i}\`).row());
       await flushDbNow();
       await ctx.reply(escapeHtml(q), { parse_mode: 'HTML', reply_markup: kb });
-    } else if (cmd === '/warn' && isAdmin && ctx.message.reply_to_message?.from) {
-      const t = ensureMember(ctx.message.reply_to_message.from);
+    } else if (cmd === '/warn' && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t || t.role === 'admin') return ctx.reply('Uso: /warn @usuario o responde a su mensaje.');
       t.warns += 1;
       await flushDbNow();
       await ctx.reply(escapeHtml(\`Advertencia para @\${t.username} (\${t.warns}/\${db.automod.maxWarns}).\`), { parse_mode: 'HTML' });
       if (t.warns >= db.automod.maxWarns) await ctx.restrictChatMember(Number(t.id), { can_send_messages: false }).catch(() => undefined);
-    } else if (cmd === '/mute' && isAdmin && ctx.message.reply_to_message?.from) {
-      const mins = Number.parseInt(args[0] ?? '', 10) || db.automod.muteDurationMin;
-      await ctx.restrictChatMember(ctx.message.reply_to_message.from.id, { can_send_messages: false }, { until_date: Math.floor(Date.now() / 1000) + mins * 60 }).catch(() => undefined);
-      await ctx.reply(\`Usuario silenciado \${mins}m.\`);
-    } else if (cmd === '/unmute' && isAdmin && ctx.message.reply_to_message?.from) {
-      await ctx.restrictChatMember(ctx.message.reply_to_message.from.id, { can_send_messages: true, can_send_polls: true, can_send_other_messages: true }).catch(() => undefined);
-      await ctx.reply('Silencio retirado.');
-    } else if (cmd === '/ban' && isAdmin && ctx.message.reply_to_message?.from) {
-      await ctx.banChatMember(ctx.message.reply_to_message.from.id).catch(() => undefined);
-      await ctx.reply('Usuario baneado.');
-    } else if (cmd === '/kick' && isAdmin && ctx.message.reply_to_message?.from) {
-      await ctx.banChatMember(ctx.message.reply_to_message.from.id).catch(() => undefined);
-      await ctx.unbanChatMember(ctx.message.reply_to_message.from.id).catch(() => undefined);
-      await ctx.reply('Usuario expulsado.');
+    } else if (cmd === '/unwarn' && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t) return ctx.reply('Uso: /unwarn @usuario');
+      if (t.warns > 0) t.warns -= 1;
+      await flushDbNow();
+      await ctx.reply(escapeHtml(\`Advertencia retirada a @\${t.username} (\${t.warns}/\${db.automod.maxWarns}).\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/mute' && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t || t.role === 'admin') return ctx.reply('Uso: /mute @usuario [min]');
+      const rawMins = ctx.message.reply_to_message?.from ? args[0] : args[1];
+      const mins = Number.parseInt(rawMins ?? '', 10) || db.automod.muteDurationMin;
+      await ctx.restrictChatMember(Number(t.id), { can_send_messages: false }, { until_date: Math.floor(Date.now() / 1000) + mins * 60 }).catch(() => undefined);
+      await ctx.reply(escapeHtml(\`@\${t.username} silenciado \${mins}m.\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/unmute' && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t) return ctx.reply('Uso: /unmute @usuario');
+      await ctx.restrictChatMember(Number(t.id), { can_send_messages: true, can_send_polls: true, can_send_other_messages: true }).catch(() => undefined);
+      await ctx.reply(escapeHtml(\`Silencio retirado a @\${t.username}.\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/ban' && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t || t.role === 'admin') return ctx.reply('Uso: /ban @usuario');
+      t.status = 'banned';
+      await ctx.banChatMember(Number(t.id)).catch(() => undefined);
+      await flushDbNow();
+      await ctx.reply(escapeHtml(\`@\${t.username} baneado del grupo.\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/unban' && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t) return ctx.reply('Uso: /unban @usuario');
+      t.status = 'verified';
+      await ctx.unbanChatMember(Number(t.id)).catch(() => undefined);
+      await flushDbNow();
+      await ctx.reply(escapeHtml(\`@\${t.username} desbaneado.\`), { parse_mode: 'HTML' });
+    } else if (cmd === '/kick' && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t || t.role === 'admin') return ctx.reply('Uso: /kick @usuario');
+      await ctx.banChatMember(Number(t.id)).catch(() => undefined);
+      await ctx.unbanChatMember(Number(t.id)).catch(() => undefined);
+      await ctx.reply(escapeHtml(\`@\${t.username} expulsado del grupo.\`), { parse_mode: 'HTML' });
+    } else if ((cmd === '/vip' || cmd === '/unvip') && isAdmin) {
+      const t = resolveMember(args[0], ctx.message.reply_to_message?.from);
+      if (!t || t.role === 'admin') return ctx.reply(\`Uso: \${cmd} @usuario\`);
+      t.role = cmd === '/vip' ? 'vip' : 'member';
+      await flushDbNow();
+      await ctx.reply(escapeHtml(\`@\${t.username} ahora tiene rol \${t.role.toUpperCase()}.\`), { parse_mode: 'HTML' });
+    } else if ((cmd === '/lock' || cmd === '/unlock') && isAdmin) {
+      const lockState = cmd === '/lock';
+      const tp = (args[0] || '').toLowerCase();
+      if (tp === 'links') { db.automod.antiLinksEnabled = lockState; await flushDbNow(); return ctx.reply(\`Anti-Links \${lockState ? 'activado' : 'desactivado'}.\`); }
+      if (!['stickers', 'gifs', 'media', 'documents', 'voice', 'all'].includes(tp)) return ctx.reply('Tipos: stickers, gifs, media, documents, voice, links, all.');
+      db.automod.locks[tp] = lockState;
+      await flushDbNow();
+      await ctx.reply(\`\${lockState ? 'Bloqueado' : 'Desbloqueado'}: \${tp}.\`);
+    } else if (cmd === '/purge' && isAdmin) {
+      const count = Math.max(1, Math.min(30, Number.parseInt(args[0] || '5', 10) || 5));
+      for (let i = 0; i <= count; i++) {
+        await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id - i).catch(() => undefined);
+      }
+    } else if (cmd === '/pin' && isAdmin) {
+      const msgText = args.join(' ').trim();
+      if (!msgText) return ctx.reply('Uso: /pin <anuncio>');
+      const sent = await ctx.reply(escapeHtml(msgText), { parse_mode: 'HTML' });
+      await ctx.api.pinChatMessage(ctx.chat.id, sent.message_id).catch(() => undefined);
+    } else if (cmd === '/unpin' && isAdmin) {
+      await ctx.api.unpinChatMessage(ctx.chat.id).catch(() => undefined);
+      await ctx.reply('Mensaje desfijado.');
     }
   }
 
@@ -736,6 +898,7 @@ setInterval(async () => {
 }, 60000).unref();
 
 await loadDb();
+await registerTelegramCommands();
 console.log('Iniciando CentinelaTG v2 en modo Long Polling...');
 bot.start({ drop_pending_updates: true, allowed_updates: ['message', 'callback_query', 'chat_join_request'] });
 
@@ -769,9 +932,11 @@ Este paquete contiene la versión autónoma y optimizada en **Node.js** de tu bo
    - \`ADMIN_USER_IDS\`: IDs numéricos de los administradores separados por coma.
    - \`GROUP_CHAT_ID\`: *(Opcional)* ID del grupo privado (\`-100...\`).
 
-## 3. Comandos incluidos en el bot
-- **Seguridad y Moderación**: \`/rules\`, \`/warn\`, \`/mute\`, \`/unmute\`, \`/kick\`, \`/ban\`, \`/lock\`, \`/unlock\`, \`/raid on|off\`, \`/slowmode [seg]\`, \`/games on|off\`.
-- **Entretenimiento y Economía**: \`/rank\`, \`/top\`, \`/daily\`, \`/misiones\`, \`/gracias @usuario\`, \`/shop\`, \`/buy\`, \`/cofre\`, \`/trivia\`, \`/ahorcado\`, \`/calculo\`, \`/dado\`, \`/ruleta\`, \`/ppt\`, \`/duelo\`, \`/lluvia\`, \`/sorteo\`, \`/encuesta\`.
+## 3. Menú "/" automático en Telegram
+Al iniciar, el bot registra automáticamente sus **45 comandos** (más tus comandos personalizados \`/\`) mediante \`setMyCommands\` en Telegram, separados por rol (miembros y administradores). **No necesitas configurar \`/setcommands\` en @BotFather** ni adivinar comandos: al escribir \`/\` en tu grupo aparecerá el menú completo.
+
+- **Seguridad y Moderación**: \`/rules\`, \`/info\`, \`/staff\`, \`/warns\`, \`/report\`, \`/warn\`, \`/unwarn\`, \`/mute\`, \`/unmute\`, \`/kick\`, \`/ban\`, \`/unban\`, \`/vip\`, \`/unvip\`, \`/lock\`, \`/unlock\`, \`/purge\`, \`/pin\`, \`/unpin\`, \`/setrules\`, \`/setwelcome\`, \`/raid on|off\`, \`/slowmode [seg]\`, \`/games on|off\`.
+- **Entretenimiento y Economía**: \`/rank\`, \`/top\`, \`/daily\`, \`/misiones\`, \`/gracias @usuario\`, \`/pay\`, \`/shop\`, \`/buy\`, \`/cofre\`, \`/trivia\`, \`/ahorcado\`, \`/calculo\`, \`/dado\`, \`/ruleta\`, \`/ppt\`, \`/duelo\`, \`/lluvia\`, \`/sorteo\`, \`/fin_sorteo\`, \`/encuesta\`, \`/bola8\`, \`/ship\`.
 `;
 }
 
