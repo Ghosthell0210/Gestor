@@ -63,6 +63,7 @@ export const BUILTIN_COMMANDS: BuiltinCommandSpec[] = [
   { command: 'games', usage: '/games <on|off>', description: 'Pausar o activar todos los juegos del grupo', category: 'admin', adminOnly: true },
   { command: 'sorteo', usage: '/sorteo <min> <ganadores> <premio>', description: 'Lanzar un sorteo automático con botón', category: 'admin', adminOnly: true },
   { command: 'fin_sorteo', usage: '/fin_sorteo', description: 'Cerrar el sorteo activo y elegir ganadores', category: 'admin', adminOnly: true },
+  { command: 'transcribir', usage: '/transcribir <on|off>', description: 'Activar o pausar la transcripción de notas de voz', category: 'admin', adminOnly: true },
 ];
 
 const VALID_TG_CMD_REGEX = /^[a-z][a-z0-9_]{0,31}$/;

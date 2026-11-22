@@ -11,12 +11,20 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Bot, InlineKeyboard } from 'grammy';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
 if (!TOKEN) {
   console.error('Falta la variable de entorno TELEGRAM_BOT_TOKEN.');
   process.exit(1);
 }
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim() || '';
+const genai = GEMINI_API_KEY
+  ? new GoogleGenAI({
+      apiKey: GEMINI_API_KEY,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    })
+  : null;
 
 const ADMIN_IDS = new Set(
   (process.env.ADMIN_USER_IDS ?? '')
@@ -79,6 +87,10 @@ async function loadDb() {
   db = JSON.parse(raw);
   db.security = db.security || { antiRaidEnabled: true, raidJoinThreshold: 5, raidWindowSec: 20, raidModeActive: false, raidAction: 'manual_approval', slowModeSec: 0, alertOnRaid: true };
   db.entertainment = db.entertainment || { gamesEnabled: true, gameCooldownSec: 10, quietHoursEnabled: false, quietStartHour: 1, quietEndHour: 7, currencyName: 'Créditos', xpPerMessage: 12, coinsPerMessage: 4, dailyRewardCoins: 120, chestCostCoins: 80, shopItems: [], triviaQuestions: [], hangmanWords: ['TELEGRAM', 'ALTARE'], activeGiveaways: [], activePolls: [], activeCoinRains: [] };
+  db.settings = db.settings || {};
+  if (typeof db.settings.voiceTranscriptionEnabled !== 'boolean') db.settings.voiceTranscriptionEnabled = true;
+  if (typeof db.settings.voiceMaxDurationSec !== 'number') db.settings.voiceMaxDurationSec = 120;
+  if (typeof db.settings.voiceSummaryThresholdSec !== 'number') db.settings.voiceSummaryThresholdSec = 35;
 }
 
 function pruneDbCollections() {
@@ -236,6 +248,74 @@ async function registerTelegramCommands() {
     console.log('Menú de comandos / registrado en Telegram (' + adminCmds.length + ' comandos).');
   } catch (err) {
     console.warn('No se pudo registrar el menú de comandos:', err?.message || err);
+  }
+}
+
+async function handleVoiceTranscription(ctx) {
+  const voice = ctx.message?.voice;
+  if (!voice || !db.settings.voiceTranscriptionEnabled) return;
+  if (voice.duration > db.settings.voiceMaxDurationSec) {
+    await ctx.api.sendMessage(
+      ctx.chat.id,
+      escapeHtml(\`Nota de voz (\${voice.duration}s) omitida: supera el límite configurado de \${db.settings.voiceMaxDurationSec}s.\`),
+      { parse_mode: 'HTML', reply_parameters: { message_id: ctx.message.message_id } }
+    ).catch(() => undefined);
+    return;
+  }
+  if (!genai) return;
+  try {
+    await ctx.api.sendChatAction(ctx.chat.id, 'typing').catch(() => undefined);
+    const tgFile = await ctx.api.getFile(voice.file_id);
+    if (!tgFile.file_path || tgFile.file_path.includes('..')) return;
+    const fileUrl = 'https://api.telegram.org/file/bot' + encodeURIComponent(TOKEN) + '/' + tgFile.file_path;
+    const res = await fetch(fileUrl);
+    if (!res.ok) return;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.byteLength === 0 || buf.byteLength > 20 * 1024 * 1024) return;
+    const mimeType = voice.mime_type && voice.mime_type.startsWith('audio/') ? voice.mime_type : 'audio/ogg';
+
+    const trRes = await genai.models.generateContent({
+      model: 'gemini-3.5-transcribe',
+      contents: {
+        parts: [
+          { inlineData: { mimeType, data: buf.toString('base64') } },
+          { text: 'Transcribe literalmente esta nota de voz en su idioma original con puntuación clara. Devuelve únicamente el texto transcrito.' },
+        ],
+      },
+    });
+    const transcript = (trRes.text || '').trim();
+    if (!transcript) return;
+
+    let summary = null;
+    if (voice.duration >= db.settings.voiceSummaryThresholdSec || transcript.length >= 280) {
+      try {
+        const sumRes = await genai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: 'Resume en español en 1 o 2 frases muy concisas la idea principal de esta nota de voz:\\n\\n' + transcript,
+          config: {
+            systemInstruction: 'Devuelve únicamente un resumen fiel de 1 o 2 frases en español, sin viñetas ni encabezados.',
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          },
+        });
+        const candidate = (sumRes.text || '').trim();
+        if (candidate) summary = candidate;
+      } catch {
+        summary = null;
+      }
+    }
+
+    const actorTag = ctx.from?.username ? '@' + ctx.from.username : (ctx.from?.first_name || 'Miembro');
+    const safeTr = escapeHtml(transcript.slice(0, 3200));
+    const body = summary
+      ? \`<b>Resumen de voz (\${escapeHtml(actorTag)} · \${voice.duration}s):</b>\\n\${escapeHtml(summary)}\\n\\n<b>Transcripción literal:</b>\\n<blockquote>\${safeTr}</blockquote>\`
+      : \`<b>Transcripción de voz (\${escapeHtml(actorTag)} · \${voice.duration}s):</b>\\n<blockquote>\${safeTr}</blockquote>\`;
+
+    await ctx.api.sendMessage(ctx.chat.id, body, {
+      parse_mode: 'HTML',
+      reply_parameters: { message_id: ctx.message.message_id },
+    });
+  } catch (err) {
+    console.warn('Error transcribiendo nota de voz:', err?.message || err);
   }
 }
 
@@ -625,6 +705,15 @@ bot.on('message', async (ctx) => {
       db.security.slowModeSec = Math.max(0, Math.min(300, Number.parseInt(args[0] || '0', 10) || 0));
       await flushDbNow();
       await ctx.reply(\`Modo lento fijado en \${db.security.slowModeSec}s.\`);
+    } else if (cmd === '/transcribir' && isAdmin) {
+      const m = (args[0] || '').toLowerCase();
+      if (m === 'on' || m === 'off') {
+        db.settings.voiceTranscriptionEnabled = m === 'on';
+        await flushDbNow();
+        await ctx.reply(\`Transcripción de notas de voz \${db.settings.voiceTranscriptionEnabled ? 'ACTIVADA' : 'pausada'} (máx. \${db.settings.voiceMaxDurationSec}s).\`);
+      } else {
+        await ctx.reply(\`Transcripción: \${db.settings.voiceTranscriptionEnabled ? 'ACTIVA' : 'Pausada'}. Uso: /transcribir on | off\`);
+      }
     } else if (cmd === '/games' && isAdmin) {
       const m = (args[0] || '').toLowerCase();
       if (m === 'on' || m === 'off') {
@@ -874,6 +963,10 @@ bot.on('message', async (ctx) => {
     }
   }
 
+  if (ctx.message.voice && db.settings.voiceTranscriptionEnabled) {
+    await handleVoiceTranscription(ctx);
+  }
+
   scheduleSaveDb();
 });
 
@@ -929,13 +1022,14 @@ Este paquete contiene la versión autónoma y optimizada en **Node.js** de tu bo
 3. Startup Command: \`node index.js\` (o \`npm start\`).
 4. Variables de Entorno:
    - \`TELEGRAM_BOT_TOKEN\`: Token de @BotFather.
+   - \`GEMINI_API_KEY\`: Clave para transcripción automática de notas de voz y resúmenes largos.
    - \`ADMIN_USER_IDS\`: IDs numéricos de los administradores separados por coma.
    - \`GROUP_CHAT_ID\`: *(Opcional)* ID del grupo privado (\`-100...\`).
 
 ## 3. Menú "/" automático en Telegram
-Al iniciar, el bot registra automáticamente sus **45 comandos** (más tus comandos personalizados \`/\`) mediante \`setMyCommands\` en Telegram, separados por rol (miembros y administradores). **No necesitas configurar \`/setcommands\` en @BotFather** ni adivinar comandos: al escribir \`/\` en tu grupo aparecerá el menú completo.
+Al iniciar, el bot registra automáticamente sus **46 comandos** (más tus comandos personalizados \`/\`) mediante \`setMyCommands\` en Telegram, separados por rol (miembros y administradores). **No necesitas configurar \`/setcommands\` en @BotFather** ni adivinar comandos: al escribir \`/\` en tu grupo aparecerá el menú completo.
 
-- **Seguridad y Moderación**: \`/rules\`, \`/info\`, \`/staff\`, \`/warns\`, \`/report\`, \`/warn\`, \`/unwarn\`, \`/mute\`, \`/unmute\`, \`/kick\`, \`/ban\`, \`/unban\`, \`/vip\`, \`/unvip\`, \`/lock\`, \`/unlock\`, \`/purge\`, \`/pin\`, \`/unpin\`, \`/setrules\`, \`/setwelcome\`, \`/raid on|off\`, \`/slowmode [seg]\`, \`/games on|off\`.
+- **Seguridad y Moderación**: \`/rules\`, \`/info\`, \`/staff\`, \`/warns\`, \`/report\`, \`/warn\`, \`/unwarn\`, \`/mute\`, \`/unmute\`, \`/kick\`, \`/ban\`, \`/unban\`, \`/vip\`, \`/unvip\`, \`/lock\`, \`/unlock\`, \`/purge\`, \`/pin\`, \`/unpin\`, \`/setrules\`, \`/setwelcome\`, \`/raid on|off\`, \`/slowmode [seg]\`, \`/transcribir on|off\`, \`/games on|off\`.
 - **Entretenimiento y Economía**: \`/rank\`, \`/top\`, \`/daily\`, \`/misiones\`, \`/gracias @usuario\`, \`/pay\`, \`/shop\`, \`/buy\`, \`/cofre\`, \`/trivia\`, \`/ahorcado\`, \`/calculo\`, \`/dado\`, \`/ruleta\`, \`/ppt\`, \`/duelo\`, \`/lluvia\`, \`/sorteo\`, \`/fin_sorteo\`, \`/encuesta\`, \`/bola8\`, \`/ship\`.
 `;
 }
@@ -950,24 +1044,25 @@ export async function buildAltareZipBuffer(): Promise<Buffer> {
 
   const pkgJson = {
     name: 'centinela-tg-bot',
-    version: '2.0.0',
-    description: 'Bot de gestión de grupos privados, Anti-Raid y entretenimiento listo para Altare',
+    version: '2.1.0',
+    description: 'Bot de gestión de grupos privados, Anti-Raid, transcripción de voz y entretenimiento listo para Altare',
     type: 'module',
     main: 'index.js',
     scripts: {
       start: 'node index.js',
     },
     dependencies: {
+      '@google/genai': '^2.32.0',
       dotenv: '^17.2.3',
       grammy: '^1.48.0',
     },
     engines: {
-      node: '>=18.0.0',
+      node: '>=20.0.0',
     },
   };
 
   root.file('package.json', JSON.stringify(pkgJson, null, 2));
-  root.file('.env.example', 'TELEGRAM_BOT_TOKEN=\nADMIN_USER_IDS=\nGROUP_CHAT_ID=\n');
+  root.file('.env.example', 'TELEGRAM_BOT_TOKEN=\nGEMINI_API_KEY=\nADMIN_USER_IDS=\nGROUP_CHAT_ID=\n');
   root.file('index.js', generateStandaloneBotJs());
   root.file('README-ALTARE.md', generateAltareReadme());
 

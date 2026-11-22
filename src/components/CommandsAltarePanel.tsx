@@ -368,6 +368,7 @@ export const CommandsAltarePanel: React.FC<CommandsAltarePanelProps> = ({
             </p>
             <ul className="space-y-1.5 font-mono text-slate-700 bg-slate-50 border border-slate-200 rounded p-3">
               <li>TELEGRAM_BOT_TOKEN=tu_token</li>
+              <li>GEMINI_API_KEY=tu_clave_gemini</li>
               <li>ADMIN_USER_IDS=123456789</li>
               <li>GROUP_CHAT_ID=-1001234567890</li>
             </ul>

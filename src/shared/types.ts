@@ -43,6 +43,9 @@ export interface BotSettings {
   scheduledAnnouncementEnabled: boolean;
   scheduledAnnouncementIntervalMin: number;
   scheduledAnnouncementText: string;
+  voiceTranscriptionEnabled: boolean;
+  voiceMaxDurationSec: number;
+  voiceSummaryThresholdSec: number;
 }
 
 export interface ContentLocks {

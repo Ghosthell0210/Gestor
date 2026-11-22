@@ -36,6 +36,9 @@ const settingsSchema = z.object({
   scheduledAnnouncementEnabled: z.boolean(),
   scheduledAnnouncementIntervalMin: z.number().int().min(15).max(1440),
   scheduledAnnouncementText: z.string().trim().min(1).max(1500),
+  voiceTranscriptionEnabled: z.boolean().default(true),
+  voiceMaxDurationSec: z.number().int().min(10).max(600).default(120),
+  voiceSummaryThresholdSec: z.number().int().min(10).max(300).default(35),
 });
 
 const automodSchema = z.object({

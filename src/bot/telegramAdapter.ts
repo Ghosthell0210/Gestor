@@ -5,6 +5,7 @@ import type { BotEffect } from './engine.ts';
 import { entertainmentEngine } from './entertainment.ts';
 import { store } from './storage.ts';
 import { buildTelegramCommandScopes } from '../shared/commandsCatalog.ts';
+import { downloadTelegramVoiceBuffer, transcribeTelegramVoice } from './voiceTranscription.ts';
 import type { BotRuntimeInfo, MessageContentType } from '../shared/types.ts';
 
 function parseAdminIds(): Set<string> {
@@ -230,6 +231,11 @@ class TelegramLongPollingAdapter {
         });
 
         await this.executeEffects(ctx, effects);
+
+        const wasDeleted = effects.some((e) => e.type === 'delete_incoming');
+        if (!wasDeleted && ctx.message.voice) {
+          await this.handleVoiceMessage(ctx);
+        }
       });
 
       const me = await bot.api.getMe();
@@ -246,6 +252,73 @@ class TelegramLongPollingAdapter {
     } catch (err) {
       this.telegramConnected = false;
       this.lastError = err instanceof Error ? err.message : 'No se pudo conectar con Telegram Bot API';
+    }
+  }
+
+  private async handleVoiceMessage(ctx: Context): Promise<void> {
+    const voice = ctx.message?.voice;
+    const chatId = ctx.chat?.id;
+    const messageId = ctx.message?.message_id;
+    if (!voice || !chatId || !messageId) return;
+
+    const db = store.get();
+    if (!db.settings.voiceTranscriptionEnabled) return;
+
+    if (voice.duration > db.settings.voiceMaxDurationSec) {
+      await ctx.api
+        .sendMessage(
+          chatId,
+          escapeHtml(
+            `Nota de voz (${voice.duration}s) omitida: supera el límite configurado de ${db.settings.voiceMaxDurationSec}s.`
+          ),
+          {
+            parse_mode: 'HTML',
+            reply_parameters: { message_id: messageId },
+          }
+        )
+        .catch(() => undefined);
+      return;
+    }
+
+    const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+    const geminiKey = process.env.GEMINI_API_KEY?.trim();
+    if (!botToken || !geminiKey) return;
+
+    try {
+      await ctx.api.sendChatAction(chatId, 'typing').catch(() => undefined);
+      const tgFile = await ctx.api.getFile(voice.file_id);
+      if (!tgFile.file_path) return;
+
+      const audioBuffer = await downloadTelegramVoiceBuffer(botToken, tgFile.file_path);
+      const result = await transcribeTelegramVoice(
+        audioBuffer,
+        voice.mime_type ?? 'audio/ogg',
+        voice.duration,
+        db.settings.voiceSummaryThresholdSec
+      );
+      if (!result) return;
+
+      const actorTag = ctx.from?.username
+        ? `@${ctx.from.username}`
+        : ctx.from?.first_name ?? 'Miembro';
+      const safeTranscript = escapeHtml(result.transcript.slice(0, 3200));
+      const formatted = result.summary
+        ? `<b>Resumen de voz (${escapeHtml(actorTag)} · ${voice.duration}s):</b>\n${escapeHtml(result.summary)}\n\n<b>Transcripción literal:</b>\n<blockquote>${safeTranscript}</blockquote>`
+        : `<b>Transcripción de voz (${escapeHtml(actorTag)} · ${voice.duration}s):</b>\n<blockquote>${safeTranscript}</blockquote>`;
+
+      await ctx.api.sendMessage(chatId, formatted, {
+        parse_mode: 'HTML',
+        reply_parameters: { message_id: messageId },
+      });
+
+      botEngine.recordVoiceTranscriptionLog(
+        ctx.from?.username ?? `user_${ctx.from?.id ?? '0'}`,
+        voice.duration,
+        Boolean(result.summary)
+      );
+    } catch (err) {
+      this.lastError =
+        err instanceof Error ? err.message : 'No se pudo transcribir la nota de voz.';
     }
   }
 

@@ -172,6 +172,9 @@ export function createInitialDatabase(): BotDatabase {
       scheduledAnnouncementIntervalMin: 180,
       scheduledAnnouncementText:
         'Recordatorio: mantén las conversaciones dentro de los temas permitidos y evita compartir enlaces externos sin autorización.',
+      voiceTranscriptionEnabled: true,
+      voiceMaxDurationSec: 120,
+      voiceSummaryThresholdSec: 35,
     },
     automod: {
       antiFloodEnabled: true,

@@ -139,6 +139,18 @@ class ModerationEngine {
     }
   }
 
+  recordVoiceTranscriptionLog(actorUsername: string, durationSec: number, summarized: boolean): void {
+    this.addLog(
+      'telegram',
+      'Nota de voz transcrita',
+      `@${actorUsername}`,
+      'Transcripción IA',
+      `Duración: ${durationSec}s${summarized ? ' · Con resumen' : ''}`,
+      'info'
+    );
+    store.scheduleSave();
+  }
+
   private pushSimulatorMessage(msg: Omit<SimulatorMessage, 'id' | 'timestamp'>): SimulatorMessage {
     const db = store.get();
     const entry: SimulatorMessage = {
@@ -944,6 +956,36 @@ class ModerationEngine {
           criticalChange = true;
           this.addLog(event.source, 'Modo lento ajustado', `@${member.username}`, db.settings.groupName, `${secs}s por mensaje`, 'info');
           emitBotReply(secs === 0 ? 'Modo lento desactivado.' : `Modo lento fijado en ${secs} segundos entre mensajes.`);
+          break;
+        }
+
+        case '/transcribir': {
+          if (!isAdmin) {
+            emitBotReply('Solo administradores.');
+            break;
+          }
+          const mode = (args[0] ?? '').toLowerCase();
+          if (mode !== 'on' && mode !== 'off') {
+            emitBotReply(
+              `Transcripción de notas de voz: ${db.settings.voiceTranscriptionEnabled ? 'ACTIVA' : 'Pausada'} (Máx. ${db.settings.voiceMaxDurationSec}s · Resumen desde ${db.settings.voiceSummaryThresholdSec}s). Usa /transcribir on o /transcribir off.`
+            );
+            break;
+          }
+          db.settings.voiceTranscriptionEnabled = mode === 'on';
+          criticalChange = true;
+          this.addLog(
+            event.source,
+            mode === 'on' ? 'Transcripción de voz activada' : 'Transcripción de voz pausada',
+            `@${member.username}`,
+            db.settings.groupName,
+            `Límite ${db.settings.voiceMaxDurationSec}s`,
+            'info'
+          );
+          emitBotReply(
+            mode === 'on'
+              ? `Transcripción automática de notas de voz ACTIVADA (máx. ${db.settings.voiceMaxDurationSec}s, resumen desde ${db.settings.voiceSummaryThresholdSec}s).`
+              : 'Transcripción automática de notas de voz pausada.'
+          );
           break;
         }
 

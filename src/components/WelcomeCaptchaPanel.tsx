@@ -282,6 +282,88 @@ export const WelcomeCaptchaPanel: React.FC<WelcomeCaptchaPanelProps> = ({ settin
           </div>
         </div>
       </section>
+
+      {/* Voice Note Automatic Transcription */}
+      <section className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">
+              Transcripción Automática de Notas de Voz
+            </h3>
+            <p className="text-xs text-slate-500">
+              Transcribe únicamente notas de voz grabadas en el chat de Telegram y agrega resumen breve si superan el umbral. También controlable con <span className="font-mono">/transcribir on|off</span>.
+            </p>
+          </div>
+          <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={draft.voiceTranscriptionEnabled}
+              onChange={(e) =>
+                setDraft({ ...draft, voiceTranscriptionEnabled: e.target.checked })
+              }
+              className="w-4 h-4 rounded border-slate-300 text-sky-600"
+            />
+            Activar transcripción de voz
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-100">
+          <div>
+            <label
+              htmlFor="voice-max-duration"
+              className="block text-xs font-medium text-slate-700 mb-1"
+            >
+              Duración máxima permitida (segundos)
+            </label>
+            <input
+              id="voice-max-duration"
+              type="number"
+              min={10}
+              max={600}
+              value={draft.voiceMaxDurationSec}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  voiceMaxDurationSec: Math.max(10, Math.min(600, Number(e.target.value) || 120)),
+                })
+              }
+              className="w-full text-sm font-mono tabular-nums border border-slate-200 rounded-md px-3 py-1.5"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Audios más largos se omiten para evitar saturación (10s – 600s).
+            </p>
+          </div>
+
+          <div>
+            <label
+              htmlFor="voice-summary-threshold"
+              className="block text-xs font-medium text-slate-700 mb-1"
+            >
+              Incluir resumen breve desde (segundos)
+            </label>
+            <input
+              id="voice-summary-threshold"
+              type="number"
+              min={10}
+              max={300}
+              value={draft.voiceSummaryThresholdSec}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  voiceSummaryThresholdSec: Math.max(
+                    10,
+                    Math.min(300, Number(e.target.value) || 35)
+                  ),
+                })
+              }
+              className="w-full text-sm font-mono tabular-nums border border-slate-200 rounded-md px-3 py-1.5"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Las notas cortas muestran solo transcripción literal; las largas añaden resumen superior.
+            </p>
+          </div>
+        </div>
+      </section>
     </form>
   );
 };
