@@ -1,0 +1,510 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Send,
+  UserPlus,
+  RotateCcw,
+  ShieldAlert,
+  Link2Off,
+  Flame,
+  Sticker,
+  Pin,
+  Trash2,
+  CheckCircle2,
+  AlertTriangle,
+} from 'lucide-react';
+import type {
+  BotDatabase,
+  BotRuntimeInfo,
+  MessageContentType,
+} from '../shared/types.ts';
+
+interface OverviewSimulatorProps {
+  db: BotDatabase;
+  runtime: BotRuntimeInfo;
+  onSendMessage: (actorId: string, text: string, contentType: MessageContentType) => Promise<void>;
+  onSimulateJoin: (name: string, username: string) => Promise<void>;
+  onCallbackClick: (actorId: string, callbackData: string) => Promise<void>;
+  onResetSimulator: () => Promise<void>;
+}
+
+const CONTENT_TYPES: { value: MessageContentType; label: string }[] = [
+  { value: 'text', label: 'Texto' },
+  { value: 'forward', label: 'Reenvío' },
+  { value: 'sticker', label: 'Sticker' },
+  { value: 'gif', label: 'GIF' },
+  { value: 'media', label: 'Foto / Video' },
+  { value: 'document', label: 'Archivo' },
+  { value: 'voice', label: 'Audio' },
+];
+
+const QUICK_COMMANDS = [
+  '/help',
+  '/rules',
+  '/info @msilva92',
+  '/warn @msilva92 Spam en chat',
+  '/lock links',
+  '/unlock links',
+  '/purge 3',
+];
+
+export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
+  db,
+  runtime,
+  onSendMessage,
+  onSimulateJoin,
+  onCallbackClick,
+  onResetSimulator,
+}) => {
+  const [actorId, setActorId] = useState<string>(db.members[0]?.id ?? '1001001');
+  const [text, setText] = useState('');
+  const [contentType, setContentType] = useState<MessageContentType>('text');
+  const [busy, setBusy] = useState(false);
+
+  const [joinName, setJoinName] = useState('Sofía Herrera');
+  const [joinUsername, setJoinUsername] = useState('sofia_h');
+
+  const feedEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!db.members.some((m) => m.id === actorId) && db.members[0]) {
+      setActorId(db.members[0].id);
+    }
+  }, [db.members, actorId]);
+
+  useEffect(() => {
+    feedEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [db.simulatorMessages.length]);
+
+  const activeActor = db.members.find((m) => m.id === actorId) ?? db.members[0];
+  const verifiedCount = db.members.filter((m) => m.status === 'verified').length;
+  const sanctionedCount = db.members.filter(
+    (m) => m.status === 'muted' || m.status === 'banned' || m.status === 'kicked'
+  ).length;
+  const pinnedMsg = [...db.simulatorMessages].reverse().find((m) => m.pinned && !m.deleted);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeActor || busy) return;
+    const payloadText =
+      text.trim() || (contentType !== 'text' ? `[Contenido simulado: ${contentType}]` : '');
+    if (!payloadText) return;
+    setBusy(true);
+    try {
+      await onSendMessage(activeActor.id, payloadText, contentType);
+      setText('');
+      setContentType('text');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleTriggerFlood = async () => {
+    const testUser = db.members.find((m) => m.role === 'member' && m.status === 'verified') ?? activeActor;
+    if (!testUser || busy) return;
+    setBusy(true);
+    try {
+      const burstCount = db.automod.floodMaxMessages + 1;
+      for (let i = 1; i <= burstCount; i++) {
+        await onSendMessage(testUser.id, `Mensaje rápido de prueba #${i}`, 'text');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleTriggerSpamLink = async () => {
+    const testUser = db.members.find((m) => m.role === 'member' && m.status === 'verified') ?? activeActor;
+    if (!testUser || busy) return;
+    setBusy(true);
+    try {
+      await onSendMessage(testUser.id, 'Únete gratis aquí https://t.me/canal_spam_externo', 'text');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleJoinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!joinName.trim() || !joinUsername.trim() || busy) return;
+    setBusy(true);
+    try {
+      await onSimulateJoin(joinName.trim(), joinUsername.trim());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* KPI Strip: flat single-elevation container with hairline column dividers */}
+      <section
+        aria-label="Indicadores del grupo"
+        className="grid grid-cols-2 lg:grid-cols-4 bg-white border border-slate-200 rounded-lg divide-y lg:divide-y-0 lg:divide-x divide-slate-200"
+      >
+        <div className="p-5">
+          <div className="text-xs font-medium text-slate-500">Miembros verificados</div>
+          <div className="mt-1.5 flex items-baseline justify-between">
+            <span className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
+              {verifiedCount}
+            </span>
+            <span className="text-xs text-slate-500 font-mono tabular-nums">
+              {db.members.length} registrados
+            </span>
+          </div>
+        </div>
+
+        <div className="p-5">
+          <div className="text-xs font-medium text-slate-500">Spam y bloqueos</div>
+          <div className="mt-1.5 flex items-baseline justify-between">
+            <span className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
+              {db.stats.blockedSpamCount}
+            </span>
+            <span className="text-xs text-slate-500 font-mono tabular-nums">
+              {db.stats.totalMessagesProcessed} procesados
+            </span>
+          </div>
+        </div>
+
+        <div className="p-5">
+          <div className="text-xs font-medium text-slate-500">Advertencias y sanciones</div>
+          <div className="mt-1.5 flex items-baseline justify-between">
+            <span className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
+              {db.stats.totalWarningsIssued}
+            </span>
+            <span className="text-xs text-amber-700 font-medium font-mono tabular-nums">
+              {sanctionedCount} restringidos
+            </span>
+          </div>
+        </div>
+
+        <div className="p-5">
+          <div className="text-xs font-medium text-slate-500">Motor de conexión</div>
+          <div className="mt-1.5 flex items-center gap-2">
+            {runtime.telegramConnected ? (
+              <>
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span className="text-sm font-semibold text-slate-900 truncate">
+                  Long Polling · @{runtime.botUsername}
+                </span>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="text-sm font-semibold text-slate-900 truncate">
+                  Modo Simulador Local
+                </span>
+              </>
+            )}
+          </div>
+          <div className="mt-1 text-xs text-slate-500">
+            {runtime.telegramConnected
+              ? 'Conectado en tiempo real con Telegram'
+              : 'Configura TELEGRAM_BOT_TOKEN para modo vivo'}
+          </div>
+        </div>
+      </section>
+
+      {/* Main Split: Interactive Telegram Group Simulator (Left) + Test Controls (Right) */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+        {/* Simulator Window */}
+        <section className="xl:col-span-8 bg-white border border-slate-200 rounded-lg overflow-hidden flex flex-col">
+          <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50/70">
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-slate-900 truncate">
+                {db.settings.groupName}
+              </h2>
+              <p className="text-xs text-slate-500">
+                Simulador de grupo privado · Captcha: {db.settings.captchaMode} · Máx. warns: {db.automod.maxWarns}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onResetSimulator}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Limpiar chat
+            </button>
+          </div>
+
+          {pinnedMsg && (
+            <div className="px-5 py-2.5 border-b border-slate-200 bg-sky-50/60 flex items-center gap-2 text-xs text-slate-700">
+              <Pin className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+              <span className="font-medium text-sky-900 shrink-0">Fijado:</span>
+              <span className="truncate">{pinnedMsg.text.replace(/^Mensaje fijado:\s*/i, '')}</span>
+            </div>
+          )}
+
+          <div className="h-[440px] overflow-y-auto p-5 space-y-3 bg-slate-50/40">
+            {db.simulatorMessages.map((msg) => {
+              if (msg.senderRole === 'system') {
+                return (
+                  <div key={msg.id} className="py-1.5 text-center">
+                    <span className="text-xs text-slate-500">{msg.text}</span>
+                  </div>
+                );
+              }
+
+              const isBot = msg.senderRole === 'bot';
+              const timeStr = new Date(msg.timestamp).toLocaleTimeString('es-ES', {
+                hour: '2-digit',
+                minute: '2-digit',
+              });
+
+              return (
+                <div
+                  key={msg.id}
+                  className={`flex flex-col ${isBot ? 'items-start' : 'items-end'}`}
+                >
+                  <div
+                    className={`max-w-[85%] rounded-lg border px-3.5 py-2.5 text-sm ${
+                      msg.deleted
+                        ? 'bg-slate-100 border-slate-200 text-slate-400'
+                        : isBot
+                          ? 'bg-white border-slate-200 text-slate-800'
+                          : 'bg-sky-50 border-sky-200 text-slate-900'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 text-xs mb-1">
+                      <span className="font-semibold text-slate-900">{msg.senderName}</span>
+                      <span className="text-slate-400" aria-hidden="true">·</span>
+                      <span className="text-slate-500 font-mono">@{msg.senderUsername}</span>
+                      <span className="text-slate-400" aria-hidden="true">·</span>
+                      <span className="text-slate-500 uppercase font-mono text-[11px]">
+                        {msg.senderRole}
+                      </span>
+                      <span className="text-slate-400" aria-hidden="true">·</span>
+                      <span className="text-slate-400 font-mono tabular-nums">{timeStr}</span>
+                    </div>
+
+                    {msg.deleted ? (
+                      <div className="flex items-center gap-1.5 text-xs italic text-slate-500">
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Mensaje eliminado por moderación</span>
+                      </div>
+                    ) : (
+                      <div className="whitespace-pre-wrap leading-relaxed break-words">
+                        {msg.messageType !== 'text' && (
+                          <span className="block text-xs font-mono text-sky-700 mb-0.5">
+                            [{msg.messageType.toUpperCase()}]
+                          </span>
+                        )}
+                        {msg.text}
+                      </div>
+                    )}
+
+                    {msg.buttons && msg.buttons.length > 0 && !msg.deleted && (
+                      <div className="mt-2.5 pt-2 border-t border-slate-100 flex flex-wrap gap-2">
+                        {msg.buttons.map((btn, idx) =>
+                          btn.url ? (
+                            <span
+                              key={idx}
+                              className="inline-flex items-center px-2.5 py-1 text-xs font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded"
+                            >
+                              {btn.text}
+                            </span>
+                          ) : (
+                            <button
+                              key={idx}
+                              type="button"
+                              onClick={() =>
+                                btn.callbackData && activeActor && onCallbackClick(activeActor.id, btn.callbackData)
+                              }
+                              className="inline-flex items-center px-2.5 py-1 text-xs font-medium text-white bg-sky-600 hover:bg-sky-700 rounded transition-colors whitespace-nowrap"
+                            >
+                              {btn.text}
+                            </button>
+                          )
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            <div ref={feedEndRef} />
+          </div>
+
+          {/* Composer */}
+          <form onSubmit={handleSubmit} className="p-4 border-t border-slate-200 bg-white space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-xs font-medium text-slate-600 shrink-0" htmlFor="sim-actor">
+                Actuar como:
+              </label>
+              <select
+                id="sim-actor"
+                value={actorId}
+                onChange={(e) => setActorId(e.target.value)}
+                className="text-xs border border-slate-200 rounded-md px-2.5 py-1.5 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                {db.members.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name} (@{m.username}) · {m.role.toUpperCase()} · {m.status}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                aria-label="Tipo de mensaje"
+                value={contentType}
+                onChange={(e) => setContentType(e.target.value as MessageContentType)}
+                className="text-xs border border-slate-200 rounded-md px-2.5 py-1.5 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                {CONTENT_TYPES.map((ct) => (
+                  <option key={ct.value} value={ct.value}>
+                    Tipo: {ct.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Escribe un mensaje o comando (/rules, /warn @msilva92, /lock stickers)..."
+                className="flex-1 min-w-0 text-sm border border-slate-200 rounded-md px-3.5 py-2 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+              <button
+                type="submit"
+                disabled={busy}
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50 rounded-md transition-colors whitespace-nowrap shrink-0"
+              >
+                <Send className="w-4 h-4" />
+                Enviar
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="text-xs text-slate-500 mr-1">Atajos:</span>
+              {QUICK_COMMANDS.map((cmd) => (
+                <button
+                  key={cmd}
+                  type="button"
+                  onClick={() => setText(cmd)}
+                  className="px-2 py-1 text-xs font-mono text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors whitespace-nowrap"
+                >
+                  {cmd}
+                </button>
+              ))}
+            </div>
+          </form>
+        </section>
+
+        {/* Right Column: Simulated Scenarios & Join Request Tester */}
+        <aside className="xl:col-span-4 space-y-6">
+          <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Simular solicitud de grupo privado</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Prueba el flujo de ingreso (`chat_join_request`), captcha y bienvenida automática.
+              </p>
+            </div>
+            <form onSubmit={handleJoinSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1" htmlFor="join-name">
+                  Nombre completo
+                </label>
+                <input
+                  id="join-name"
+                  type="text"
+                  value={joinName}
+                  onChange={(e) => setJoinName(e.target.value)}
+                  className="w-full text-sm border border-slate-200 rounded-md px-3 py-1.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1" htmlFor="join-user">
+                  Usuario Telegram
+                </label>
+                <input
+                  id="join-user"
+                  type="text"
+                  value={joinUsername}
+                  onChange={(e) => setJoinUsername(e.target.value)}
+                  className="w-full text-sm font-mono border border-slate-200 rounded-md px-3 py-1.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={busy}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 rounded-md transition-colors whitespace-nowrap"
+              >
+                <UserPlus className="w-4 h-4" />
+                Simular solicitud de ingreso
+              </button>
+            </form>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Pruebas automáticas de ataque</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Dispara escenarios reales para verificar cómo responde AutoMod con tu configuración actual.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleTriggerFlood}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Flame className="w-4 h-4 text-amber-600" />
+                  Simular ráfaga Anti-Flood ({db.automod.floodMaxMessages + 1} msgs)
+                </span>
+                <span className="font-mono text-slate-400">Ejecutar</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleTriggerSpamLink}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Link2Off className="w-4 h-4 text-rose-600" />
+                  Enviar enlace t.me no autorizado
+                </span>
+                <span className="font-mono text-slate-400">Ejecutar</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  activeActor &&
+                  onSendMessage(activeActor.id, 'Oferta de casino y criptoregalo gratis', 'text')
+                }
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-rose-600" />
+                  Probar filtro de palabras prohibidas
+                </span>
+                <span className="font-mono text-slate-400">Ejecutar</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  activeActor && onSendMessage(activeActor.id, '[Sticker animado]', 'sticker')
+                }
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Sticker className="w-4 h-4 text-sky-600" />
+                  Enviar Sticker (probar bloqueo)
+                </span>
+                <span className="font-mono text-slate-400">Ejecutar</span>
+              </button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+};

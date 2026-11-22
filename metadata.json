@@ -1,0 +1,6 @@
+{
+  "name": "CentinelaTG",
+  "description": "Bot de Telegram en Node.js para gestión integral de grupos privados, con panel web de control, simulador interactivo y exportador listo para Altare.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
