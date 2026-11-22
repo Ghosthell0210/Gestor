@@ -16,11 +16,13 @@ interface MembersAuditPanelProps {
   members: MemberRecord[];
   auditLogs: AuditLogEntry[];
   maxWarns: number;
+  currencyName: string;
   onMemberAction: (
     memberId: string,
     action: 'warn' | 'unwarn' | 'mute' | 'unmute' | 'kick' | 'ban' | 'unban' | 'set_vip' | 'set_member' | 'approve',
     reason?: string
   ) => Promise<void>;
+  onEconomyAdjust: (memberId: string, coinsDelta: number, xpDelta: number) => Promise<void>;
 }
 
 const STATUS_META: Record<
@@ -39,7 +41,9 @@ export const MembersAuditPanel: React.FC<MembersAuditPanelProps> = ({
   members,
   auditLogs,
   maxWarns,
+  currencyName,
   onMemberAction,
+  onEconomyAdjust,
 }) => {
   const [memberSearch, setMemberSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'verified' | 'restricted' | 'pending'>('all');
@@ -103,13 +107,12 @@ export const MembersAuditPanel: React.FC<MembersAuditPanelProps> = ({
 
   return (
     <div className="space-y-8">
-      {/* Members Directory */}
       <section className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-slate-900">Directorio de Miembros</h2>
             <p className="text-sm text-slate-500">
-              Administra advertencias, permisos VIP, aprobaciones y sanciones en tiempo real.
+              Administra advertencias, VIP, aprobaciones, nivel XP y {currencyName} en tiempo real.
             </p>
           </div>
 
@@ -159,15 +162,16 @@ export const MembersAuditPanel: React.FC<MembersAuditPanelProps> = ({
                   <th className="py-2.5 px-4">Miembro</th>
                   <th className="py-2.5 px-4">Rol</th>
                   <th className="py-2.5 px-4">Estado</th>
+                  <th className="py-2.5 px-4 text-right">Nivel · XP</th>
+                  <th className="py-2.5 px-4 text-right">{currencyName} · Rep</th>
                   <th className="py-2.5 px-4 text-right">Warns</th>
-                  <th className="py-2.5 px-4 text-right">Mensajes</th>
-                  <th className="py-2.5 px-4 text-right">Acciones de moderación</th>
+                  <th className="py-2.5 px-4 text-right">Acciones de moderación y saldo</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-xs">
                 {filteredMembers.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 px-4 text-center text-slate-500">
+                    <td colSpan={7} className="py-8 px-4 text-center text-slate-500">
                       No hay miembros que coincidan con el filtro aplicado.
                     </td>
                   </tr>
@@ -207,102 +211,115 @@ export const MembersAuditPanel: React.FC<MembersAuditPanelProps> = ({
                           </span>
                         </td>
 
+                        <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                          Nv.{m.level} · {m.xp}
+                        </td>
+
+                        <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                          {m.coins} · +{m.reputation}
+                        </td>
+
                         <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-800">
                           {m.warns}/{maxWarns}
                         </td>
 
-                        <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-600">
-                          {m.messageCount}
-                        </td>
-
                         <td className="py-2.5 px-4 text-right">
-                          {isAdmin ? (
-                            <span className="text-slate-400">Protegido (Admin)</span>
-                          ) : (
-                            <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
-                              {(m.status === 'pending_approval' || m.status === 'pending_captcha') && (
+                          <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() => onEconomyAdjust(m.id, 50, 0)}
+                              className="px-2 py-1 text-xs font-mono font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded whitespace-nowrap"
+                              title={`Sumar 50 ${currencyName}`}
+                            >
+                              +50
+                            </button>
+
+                            {!isAdmin && (
+                              <>
+                                {(m.status === 'pending_approval' || m.status === 'pending_captcha') && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => triggerAction(m.id, 'approve')}
+                                    className="px-2 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded whitespace-nowrap"
+                                  >
+                                    Aprobar
+                                  </button>
+                                )}
+
                                 <button
                                   type="button"
                                   disabled={isBusy}
-                                  onClick={() => triggerAction(m.id, 'approve')}
-                                  className="px-2 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded whitespace-nowrap"
+                                  onClick={() => triggerAction(m.id, 'warn')}
+                                  className="px-2 py-1 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 rounded whitespace-nowrap"
                                 >
-                                  Aprobar
+                                  +1 Warn
                                 </button>
-                              )}
 
-                              <button
-                                type="button"
-                                disabled={isBusy}
-                                onClick={() => triggerAction(m.id, 'warn')}
-                                className="px-2 py-1 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 rounded whitespace-nowrap"
-                              >
-                                +1 Warn
-                              </button>
+                                {m.warns > 0 && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => triggerAction(m.id, 'unwarn')}
+                                    className="px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap"
+                                  >
+                                    -1 Warn
+                                  </button>
+                                )}
 
-                              {m.warns > 0 && (
+                                {m.status === 'muted' ? (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => triggerAction(m.id, 'unmute')}
+                                    className="px-2 py-1 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded whitespace-nowrap"
+                                  >
+                                    Quitar Mute
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => triggerAction(m.id, 'mute')}
+                                    className="px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap"
+                                  >
+                                    Mute
+                                  </button>
+                                )}
+
                                 <button
                                   type="button"
                                   disabled={isBusy}
-                                  onClick={() => triggerAction(m.id, 'unwarn')}
+                                  onClick={() =>
+                                    triggerAction(m.id, m.role === 'vip' ? 'set_member' : 'set_vip')
+                                  }
                                   className="px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap"
                                 >
-                                  -1 Warn
+                                  {m.role === 'vip' ? 'Quitar VIP' : 'Dar VIP'}
                                 </button>
-                              )}
 
-                              {m.status === 'muted' ? (
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => triggerAction(m.id, 'unmute')}
-                                  className="px-2 py-1 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded whitespace-nowrap"
-                                >
-                                  Quitar Mute
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => triggerAction(m.id, 'mute')}
-                                  className="px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap"
-                                >
-                                  Mute
-                                </button>
-                              )}
-
-                              <button
-                                type="button"
-                                disabled={isBusy}
-                                onClick={() =>
-                                  triggerAction(m.id, m.role === 'vip' ? 'set_member' : 'set_vip')
-                                }
-                                className="px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap"
-                              >
-                                {m.role === 'vip' ? 'Quitar VIP' : 'Dar VIP'}
-                              </button>
-
-                              {m.status === 'banned' || m.status === 'kicked' ? (
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => triggerAction(m.id, 'unban')}
-                                  className="px-2 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded whitespace-nowrap"
-                                >
-                                  Desbanear
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  disabled={isBusy}
-                                  onClick={() => triggerAction(m.id, 'ban')}
-                                  className="px-2 py-1 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 rounded whitespace-nowrap"
-                                >
-                                  Ban
-                                </button>
-                              )}
-                            </div>
-                          )}
+                                {m.status === 'banned' || m.status === 'kicked' ? (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => triggerAction(m.id, 'unban')}
+                                    className="px-2 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded whitespace-nowrap"
+                                  >
+                                    Desbanear
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => triggerAction(m.id, 'ban')}
+                                    className="px-2 py-1 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 rounded whitespace-nowrap"
+                                  >
+                                    Ban
+                                  </button>
+                                )}
+                              </>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );

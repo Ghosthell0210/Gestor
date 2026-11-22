@@ -11,21 +11,34 @@ import {
   X,
   CheckCircle2,
   AlertCircle,
+  BarChart3,
+  Gamepad2,
 } from 'lucide-react';
 import type {
   AutomodConfig,
   BotSettings,
   BotStateSnapshot,
   CustomCommand,
+  EntertainmentConfig,
   MessageContentType,
+  SecurityConfig,
 } from './shared/types.ts';
 import { OverviewSimulator } from './components/OverviewSimulator.tsx';
+import { AnalyticsSecurityPanel } from './components/AnalyticsSecurityPanel.tsx';
+import { EntertainmentPanel } from './components/EntertainmentPanel.tsx';
 import { AutomodPanel } from './components/AutomodPanel.tsx';
 import { WelcomeCaptchaPanel } from './components/WelcomeCaptchaPanel.tsx';
 import { MembersAuditPanel } from './components/MembersAuditPanel.tsx';
 import { CommandsAltarePanel } from './components/CommandsAltarePanel.tsx';
 
-type NavTab = 'overview' | 'automod' | 'welcome' | 'members' | 'altare';
+type NavTab =
+  | 'overview'
+  | 'analytics'
+  | 'entertainment'
+  | 'automod'
+  | 'welcome'
+  | 'members'
+  | 'altare';
 
 const NAV_ITEMS: {
   id: NavTab;
@@ -33,6 +46,8 @@ const NAV_ITEMS: {
   Icon: React.ComponentType<{ className?: string }>;
 }[] = [
   { id: 'overview', label: 'Resumen y Simulador', Icon: MessageSquareCode },
+  { id: 'analytics', label: 'Analítica y Anti-Raid', Icon: BarChart3 },
+  { id: 'entertainment', label: 'Entretenimiento', Icon: Gamepad2 },
   { id: 'automod', label: 'Auto-Moderación', Icon: Shield },
   { id: 'welcome', label: 'Bienvenida y Captcha', Icon: UserCheck },
   { id: 'members', label: 'Miembros y Registro', Icon: Users },
@@ -72,27 +87,30 @@ export default function App() {
     fetchState();
   }, [fetchState]);
 
-  const apiMutate = async (url: string, method: 'PUT' | 'POST', body?: unknown, successMsg?: string) => {
-    try {
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error ?? 'Error al guardar cambios.');
+  const apiMutate = useCallback(
+    async (url: string, method: 'PUT' | 'POST', body?: unknown, successMsg?: string) => {
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error ?? 'Error al guardar cambios.');
+        }
+        if (data.database && data.runtime) {
+          setSnapshot({ database: data.database, runtime: data.runtime });
+        }
+        if (successMsg) showToast(successMsg, 'ok');
+        else if (data.toast) showToast(data.toast, 'ok');
+        else if (data.summary) showToast(data.summary, 'ok');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Error inesperado', 'err');
       }
-      if (data.database && data.runtime) {
-        setSnapshot({ database: data.database, runtime: data.runtime });
-      }
-      if (successMsg) showToast(successMsg, 'ok');
-      else if (data.toast) showToast(data.toast, 'ok');
-      else if (data.summary) showToast(data.summary, 'ok');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Error inesperado', 'err');
-    }
-  };
+    },
+    [showToast]
+  );
 
   const handleSaveSettings = async (next: BotSettings) => {
     await apiMutate('/api/settings', 'PUT', next, 'Configuración de bienvenida y acceso guardada.');
@@ -100,6 +118,37 @@ export default function App() {
 
   const handleSaveAutomod = async (next: AutomodConfig) => {
     await apiMutate('/api/automod', 'PUT', next, 'Reglas de Auto-Moderación guardadas.');
+  };
+
+  const handleSaveSecurity = async (next: SecurityConfig) => {
+    await apiMutate('/api/security', 'PUT', next, 'Configuración de seguridad Anti-Raid guardada.');
+  };
+
+  const handleDisableRaidMode = async () => {
+    if (!snapshot) return;
+    await apiMutate(
+      '/api/security',
+      'PUT',
+      { ...snapshot.database.security, raidModeActive: false },
+      'Modo emergencia Anti-Raid desactivado.'
+    );
+  };
+
+  const handleSaveEntertainment = async (next: EntertainmentConfig) => {
+    await apiMutate('/api/entertainment', 'PUT', next, 'Ajustes de entretenimiento y tienda guardados.');
+  };
+
+  const handleCreateGiveaway = async (prize: string, winnersCount: number, durationMin: number) => {
+    await apiMutate('/api/giveaways', 'POST', {
+      action: 'create',
+      prize,
+      winnersCount,
+      durationMin,
+    });
+  };
+
+  const handleCloseGiveaway = async (giveawayId: string) => {
+    await apiMutate('/api/giveaways', 'POST', { action: 'close', giveawayId });
   };
 
   const handleSaveCommands = async (next: CustomCommand[]) => {
@@ -112,6 +161,13 @@ export default function App() {
     reason?: string
   ) => {
     await apiMutate(`/api/members/${encodeURIComponent(memberId)}/action`, 'POST', { action, reason });
+  };
+
+  const handleEconomyAdjust = async (memberId: string, coinsDelta: number, xpDelta: number) => {
+    await apiMutate(`/api/members/${encodeURIComponent(memberId)}/economy`, 'POST', {
+      coinsDelta,
+      xpDelta,
+    });
   };
 
   const handleSendMessage = async (actorId: string, text: string, contentType: MessageContentType) => {
@@ -130,21 +186,29 @@ export default function App() {
     await apiMutate('/api/simulator/reset', 'POST', {}, 'Simulador reiniciado.');
   };
 
-  const handleDownloadAltareZip = () => {
+  const triggerDownload = (url: string, filename: string, message: string) => {
     const link = document.createElement('a');
-    link.href = '/api/export/altare.zip';
-    link.download = 'centinela-tg-altare.zip';
+    link.href = url;
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     link.remove();
-    showToast('Descargando paquete listo para Altare...', 'ok');
+    showToast(message, 'ok');
+  };
+
+  const handleRestoreBackup = async (jsonText: string) => {
+    try {
+      const parsed = JSON.parse(jsonText);
+      await apiMutate('/api/backup/restore', 'POST', parsed);
+    } catch {
+      showToast('Archivo JSON inválido para restauración.', 'err');
+    }
   };
 
   const activeNavItem = NAV_ITEMS.find((n) => n.id === activeTab) ?? NAV_ITEMS[0];
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex">
-      {/* Mobile Sidebar Backdrop */}
       {mobileMenuOpen && (
         <div
           className="fixed inset-0 bg-slate-900/40 z-30 lg:hidden"
@@ -210,7 +274,6 @@ export default function App() {
 
       {/* Main Viewport */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Top Bar Contract: Breadcrumb on left + Single primary CTA on right */}
         <header className="h-16 px-4 sm:px-6 bg-white border-b border-slate-200 flex items-center justify-between gap-6 sticky top-0 z-20">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -230,7 +293,13 @@ export default function App() {
 
           <button
             type="button"
-            onClick={handleDownloadAltareZip}
+            onClick={() =>
+              triggerDownload(
+                '/api/export/altare.zip',
+                'centinela-tg-altare.zip',
+                'Descargando paquete listo para Altare...'
+              )
+            }
             className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-md transition-colors whitespace-nowrap shrink-0"
           >
             <Download className="w-3.5 h-3.5" />
@@ -269,6 +338,33 @@ export default function App() {
                   onSimulateJoin={handleSimulateJoin}
                   onCallbackClick={handleCallbackClick}
                   onResetSimulator={handleResetSimulator}
+                  onDisableRaidMode={handleDisableRaidMode}
+                />
+              )}
+              {activeTab === 'analytics' && (
+                <AnalyticsSecurityPanel
+                  security={snapshot.database.security}
+                  analytics={snapshot.database.analytics}
+                  stats={snapshot.database.stats}
+                  members={snapshot.database.members}
+                  currencyName={snapshot.database.entertainment.currencyName}
+                  onSaveSecurity={handleSaveSecurity}
+                  onDownloadBackup={() =>
+                    triggerDownload(
+                      '/api/backup/export',
+                      'centinela-backup.json',
+                      'Descargando copia de seguridad JSON...'
+                    )
+                  }
+                  onRestoreBackup={handleRestoreBackup}
+                />
+              )}
+              {activeTab === 'entertainment' && (
+                <EntertainmentPanel
+                  entertainment={snapshot.database.entertainment}
+                  onSave={handleSaveEntertainment}
+                  onCreateGiveaway={handleCreateGiveaway}
+                  onCloseGiveaway={handleCloseGiveaway}
                 />
               )}
               {activeTab === 'automod' && (
@@ -288,7 +384,9 @@ export default function App() {
                   members={snapshot.database.members}
                   auditLogs={snapshot.database.auditLogs}
                   maxWarns={snapshot.database.automod.maxWarns}
+                  currencyName={snapshot.database.entertainment.currencyName}
                   onMemberAction={handleMemberAction}
+                  onEconomyAdjust={handleEconomyAdjust}
                 />
               )}
               {activeTab === 'altare' && (
@@ -296,7 +394,13 @@ export default function App() {
                   commands={snapshot.database.customCommands}
                   runtime={snapshot.runtime}
                   onSaveCommands={handleSaveCommands}
-                  onDownloadZip={handleDownloadAltareZip}
+                  onDownloadZip={() =>
+                    triggerDownload(
+                      '/api/export/altare.zip',
+                      'centinela-tg-altare.zip',
+                      'Descargando paquete listo para Altare...'
+                    )
+                  }
                 />
               )}
             </>
@@ -304,7 +408,6 @@ export default function App() {
         </main>
       </div>
 
-      {/* Feedback Toast */}
       {toast && (
         <div
           role="status"

@@ -1,11 +1,11 @@
 import crypto from 'node:crypto';
-import { store } from './storage.ts';
+import { store, createEmptyMissions, todayKey } from './storage.ts';
+import { entertainmentEngine } from './entertainment.ts';
 import type {
   AuditSeverity,
   AuditSource,
   ContentLocks,
   MemberRecord,
-  MemberRole,
   MessageContentType,
   SimulatorButton,
   SimulatorMessage,
@@ -79,6 +79,41 @@ function formatTemplate(
 
 class ModerationEngine {
   private floodTracker = new Map<string, number[]>();
+  private slowModeTracker = new Map<string, number>();
+  private joinTracker: number[] = [];
+
+  constructor() {
+    const pruneTimer = setInterval(() => {
+      this.pruneTrackers();
+      entertainmentEngine.pruneMemory();
+    }, 300_000);
+    pruneTimer.unref();
+  }
+
+  private pruneTrackers(): void {
+    const now = Date.now();
+    for (const [k, list] of this.floodTracker) {
+      const fresh = list.filter((ts) => now - ts <= 120_000);
+      if (fresh.length === 0) this.floodTracker.delete(k);
+      else this.floodTracker.set(k, fresh);
+    }
+    for (const [k, ts] of this.slowModeTracker) {
+      if (now - ts > 600_000) this.slowModeTracker.delete(k);
+    }
+    this.joinTracker = this.joinTracker.filter((ts) => now - ts <= 300_000);
+  }
+
+  private recordAnalytics(field: 'messages' | 'blocked' | 'warnings' | 'gamesPlayed'): void {
+    const db = store.get();
+    const hourLabel = `${String(new Date().getHours()).padStart(2, '0')}:00`;
+    let bucket = db.analytics[db.analytics.length - 1];
+    if (!bucket || bucket.label !== hourLabel) {
+      bucket = { label: hourLabel, messages: 0, blocked: 0, warnings: 0, gamesPlayed: 0 };
+      db.analytics.push(bucket);
+      if (db.analytics.length > 24) db.analytics = db.analytics.slice(-24);
+    }
+    bucket[field] += 1;
+  }
 
   private addLog(
     source: AuditSource,
@@ -142,6 +177,14 @@ class ModerationEngine {
       joinedAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       messageCount: 0,
+      xp: 0,
+      level: 1,
+      coins: 50,
+      reputation: 0,
+      dailyStreak: 0,
+      lastDailyAt: null,
+      badges: [],
+      dailyMissions: createEmptyMissions(todayKey()),
     };
     db.members.push(created);
     return created;
@@ -176,6 +219,7 @@ class ModerationEngine {
       at: new Date().toISOString(),
     });
     db.stats.totalWarningsIssued += 1;
+    this.recordAnalytics('warnings');
 
     const max = db.automod.maxWarns;
     this.addLog(
@@ -226,21 +270,60 @@ class ModerationEngine {
     const effects: BotEffect[] = [];
     const groupName = db.settings.groupName;
 
-    if (db.settings.approveJoinRequests === 'manual') {
+    // Anti-Raid surge detection
+    if (db.security.antiRaidEnabled && !actor.isAdmin) {
+      const now = Date.now();
+      const winMs = db.security.raidWindowSec * 1000;
+      this.joinTracker = this.joinTracker.filter((t) => now - t <= winMs);
+      this.joinTracker.push(now);
+
+      if (this.joinTracker.length >= db.security.raidJoinThreshold && !db.security.raidModeActive) {
+        db.security.raidModeActive = true;
+        db.stats.raidsBlocked += 1;
+        if (db.security.raidAction === 'lock_all') {
+          db.automod.locks.all = true;
+        }
+        this.addLog(
+          source,
+          'ALERTA ANTI-RAID ACTIVADA',
+          'Seguridad Anti-Raid',
+          groupName,
+          `Detectados ${this.joinTracker.length} ingresos en ${db.security.raidWindowSec}s. Modo emergencia activo.`,
+          'danger'
+        );
+        if (db.security.alertOnRaid) {
+          const alertText = `ALERTA ANTI-RAID: ${this.joinTracker.length} ingresos en ${db.security.raidWindowSec}s. Modo emergencia activado (${db.security.raidAction}). Usa /raid off cuando sea seguro.`;
+          effects.push({ type: 'reply', text: alertText });
+          if (source === 'simulator') {
+            this.pushSimulatorMessage({
+              senderId: 'bot',
+              senderName: 'CentinelaTG',
+              senderUsername: 'CentinelaTG_bot',
+              senderRole: 'bot',
+              text: alertText,
+              messageType: 'text',
+            });
+          }
+        }
+      }
+    }
+
+    // If Raid Mode is active, hold all non-admin join requests manually
+    if (db.security.raidModeActive || db.settings.approveJoinRequests === 'manual') {
       member.status = 'pending_approval';
       this.addLog(
         source,
-        'Solicitud de ingreso pendiente',
+        db.security.raidModeActive ? 'Ingreso retenido (Anti-Raid)' : 'Solicitud de ingreso pendiente',
         'Control PV',
         `@${member.username}`,
         'En espera de aprobación manual de un administrador.',
-        'info'
+        db.security.raidModeActive ? 'warning' : 'info'
       );
       const buttons: SimulatorButton[] = [
         { text: 'Aprobar ingreso', callbackData: `approve_join:${member.id}` },
         { text: 'Rechazar', callbackData: `decline_join:${member.id}` },
       ];
-      const text = `Nueva solicitud para entrar a ${groupName}: ${member.name} (@${member.username}). Requiere aprobación de un administrador.`;
+      const text = `${db.security.raidModeActive ? '[ANTI-RAID ACTIVO] ' : ''}Solicitud de ingreso de ${member.name} (@${member.username}) en espera de aprobación manual.`;
       effects.push({ type: 'reply', text, buttons });
       if (source === 'simulator') {
         this.pushSimulatorMessage({
@@ -286,7 +369,6 @@ class ModerationEngine {
       return effects;
     }
 
-    // Captcha required
     member.status = 'pending_captcha';
     effects.push({ type: 'approve_join', targetUserId: member.id });
     effects.push({ type: 'mute_user', targetUserId: member.id, durationMin: 5 });
@@ -344,38 +426,60 @@ class ModerationEngine {
   ): Promise<{ replyText: string; effects: BotEffect[] }> {
     const db = store.get();
     const effects: BotEffect[] = [];
+    const member = this.ensureMember(actor);
+
+    // Entertainment callbacks (Trivia, Duels, Coin Rain, Giveaways, Polls)
+    const entRes = entertainmentEngine.handleCallback(source, member, callbackData);
+    if (entRes.handled) {
+      if (entRes.announceText) {
+        effects.push({ type: 'reply', text: entRes.announceText, buttons: entRes.buttons });
+        if (source === 'simulator') {
+          this.pushSimulatorMessage({
+            senderId: 'bot',
+            senderName: 'CentinelaTG',
+            senderUsername: 'CentinelaTG_bot',
+            senderRole: 'bot',
+            text: entRes.announceText,
+            messageType: 'text',
+            buttons: entRes.buttons,
+          });
+        }
+      }
+      await store.save();
+      return { replyText: entRes.toastText, effects };
+    }
 
     if (callbackData.startsWith('verify:')) {
       const [, targetId, answer] = callbackData.split(':');
-      const member = db.members.find((m) => m.id === targetId);
-      if (!member) {
+      const target = db.members.find((m) => m.id === targetId);
+      if (!target) {
         return { replyText: 'Usuario no encontrado para verificar.', effects };
       }
       if (actor.id !== targetId && !actor.isAdmin) {
         return { replyText: 'Este botón de verificación pertenece a otro miembro.', effects };
       }
-      if (member.status !== 'pending_captcha') {
-        return { replyText: `@${member.username} ya está verificado.`, effects };
+      if (target.status !== 'pending_captcha') {
+        return { replyText: `@${target.username} ya está verificado.`, effects };
       }
-      if (member.pendingCaptchaAnswer && member.pendingCaptchaAnswer !== answer) {
-        this.addLog(source, 'Captcha fallido', `@${member.username}`, `@${member.username}`, `Respuesta incorrecta (${answer})`, 'warning');
+      if (target.pendingCaptchaAnswer && target.pendingCaptchaAnswer !== answer) {
+        this.addLog(source, 'Captcha fallido', `@${target.username}`, `@${target.username}`, `Respuesta incorrecta (${answer})`, 'warning');
         return { replyText: 'Respuesta incorrecta. Intenta de nuevo antes de que expire el tiempo.', effects };
       }
 
-      member.status = 'verified';
-      member.pendingCaptchaAnswer = undefined;
-      member.mutedUntil = null;
+      target.status = 'verified';
+      target.pendingCaptchaAnswer = undefined;
+      target.mutedUntil = null;
       db.stats.captchasPassed += 1;
-      effects.push({ type: 'unmute_user', targetUserId: member.id });
-      this.addLog(source, 'Verificación completada', 'Captcha', `@${member.username}`, 'Permisos de escritura habilitados.', 'info');
+      effects.push({ type: 'unmute_user', targetUserId: target.id });
+      this.addLog(source, 'Verificación completada', 'Captcha', `@${target.username}`, 'Permisos de escritura habilitados.', 'info');
 
       const welcomeText = db.settings.welcomeEnabled
         ? formatTemplate(db.settings.welcomeMessage, {
-            nombre: member.name,
-            usuario: `@${member.username}`,
+            nombre: target.name,
+            usuario: `@${target.username}`,
             grupo: db.settings.groupName,
           })
-        : `@${member.username} verificado correctamente.`;
+        : `@${target.username} verificado correctamente.`;
 
       const buttons = db.settings.welcomeEnabled
         ? db.settings.welcomeButtons.map((b) => ({ text: b.text, url: b.url }))
@@ -400,8 +504,7 @@ class ModerationEngine {
     if (callbackData.startsWith('approve_join:') || callbackData.startsWith('decline_join:')) {
       const isApprove = callbackData.startsWith('approve_join:');
       const targetId = callbackData.split(':')[1];
-      const caller = this.ensureMember(actor);
-      if (caller.role !== 'admin' && !actor.isAdmin) {
+      if (member.role !== 'admin' && !actor.isAdmin) {
         return { replyText: 'Solo los administradores pueden aprobar o rechazar solicitudes.', effects };
       }
       const target = db.members.find((m) => m.id === targetId);
@@ -412,9 +515,9 @@ class ModerationEngine {
         target.status = 'verified';
         db.stats.captchasPassed += 1;
         effects.push({ type: 'approve_join', targetUserId: target.id });
-        const text = `Solicitud aprobada por @${caller.username}. Bienvenido/a @${target.username} a ${db.settings.groupName}.`;
+        const text = `Solicitud aprobada por @${member.username}. Bienvenido/a @${target.username} a ${db.settings.groupName}.`;
         effects.push({ type: 'reply', text });
-        this.addLog(source, 'Solicitud aprobada', `@${caller.username}`, `@${target.username}`, 'Ingreso autorizado al grupo PV.', 'info');
+        this.addLog(source, 'Solicitud aprobada', `@${member.username}`, `@${target.username}`, 'Ingreso autorizado al grupo PV.', 'info');
         if (source === 'simulator') {
           this.pushSimulatorMessage({
             senderId: 'bot',
@@ -428,9 +531,9 @@ class ModerationEngine {
       } else {
         target.status = 'kicked';
         effects.push({ type: 'decline_join', targetUserId: target.id });
-        const text = `Solicitud de @${target.username} rechazada por @${caller.username}.`;
+        const text = `Solicitud de @${target.username} rechazada por @${member.username}.`;
         effects.push({ type: 'reply', text });
-        this.addLog(source, 'Solicitud rechazada', `@${caller.username}`, `@${target.username}`, 'Acceso denegado.', 'warning');
+        this.addLog(source, 'Solicitud rechazada', `@${member.username}`, `@${target.username}`, 'Acceso denegado.', 'warning');
         if (source === 'simulator') {
           this.pushSimulatorMessage({
             senderId: 'bot',
@@ -458,12 +561,13 @@ class ModerationEngine {
     const member = this.ensureMember(event.actor);
     const isAdmin = member.role === 'admin' || Boolean(event.actor.isAdmin);
     const isVip = member.role === 'vip';
+    let criticalChange = false;
 
-    // Lift expired mute automatically
     if (member.status === 'muted' && member.mutedUntil) {
       if (new Date(member.mutedUntil).getTime() <= Date.now()) {
         member.status = 'verified';
         member.mutedUntil = null;
+        criticalChange = true;
       }
     }
 
@@ -510,6 +614,7 @@ class ModerationEngine {
 
     db.stats.totalMessagesProcessed += 1;
     member.messageCount += 1;
+    this.recordAnalytics('messages');
 
     const emitBotReply = (text: string, buttons?: SimulatorButton[]) => {
       effects.push({ type: 'reply', text, buttons });
@@ -531,9 +636,25 @@ class ModerationEngine {
       if (simMsg) simMsg.deleted = true;
     };
 
-    // 1. Auto-Moderation Checks (non-admins)
+    // 1. Auto-Moderation & Slow Mode Checks (non-admins)
     if (!isAdmin) {
-      // A) Content locks
+      // A) Slow Mode
+      if (db.security.slowModeSec > 0 && !isVip) {
+        const now = Date.now();
+        const lastMsg = this.slowModeTracker.get(member.id) ?? 0;
+        const diffSec = Math.ceil((lastMsg + db.security.slowModeSec * 1000 - now) / 1000);
+        if (diffSec > 0) {
+          deleteIncoming();
+          db.stats.blockedSpamCount += 1;
+          this.recordAnalytics('blocked');
+          emitBotReply(`Modo lento activo: @${member.username}, espera ${diffSec}s antes de enviar otro mensaje.`);
+          store.scheduleSave();
+          return { effects, incomingMessage: simMsg };
+        }
+        this.slowModeTracker.set(member.id, now);
+      }
+
+      // B) Content locks
       const locks = db.automod.locks;
       const lockedByAll = locks.all;
       const lockedByType =
@@ -546,6 +667,7 @@ class ModerationEngine {
       if ((lockedByAll || lockedByType) && !isVip) {
         deleteIncoming();
         db.stats.blockedSpamCount += 1;
+        this.recordAnalytics('blocked');
         const lockLabel = lockedByAll ? 'bloqueo global de chat' : `bloqueo de ${event.contentType}`;
         this.addLog(event.source, 'Contenido bloqueado', 'AutoMod · Locks', `@${member.username}`, lockLabel, 'warning');
         emitBotReply(`Mensaje eliminado de @${member.username}: ${lockLabel} activo.`);
@@ -553,7 +675,7 @@ class ModerationEngine {
         return { effects, incomingMessage: simMsg };
       }
 
-      // B) Anti-Flood
+      // C) Anti-Flood
       if (db.automod.antiFloodEnabled && !isVip) {
         const nowMs = Date.now();
         const windowMs = db.automod.floodWindowSec * 1000;
@@ -565,6 +687,7 @@ class ModerationEngine {
           this.floodTracker.set(member.id, []);
           deleteIncoming();
           db.stats.blockedSpamCount += 1;
+          this.recordAnalytics('blocked');
           if (db.automod.floodAction === 'warn') {
             const res = this.applyWarn(event.source, member, 'Exceso de mensajes rápidos (Anti-Flood)', 'AutoMod · Anti-Flood');
             if (res.escalatedEffect) effects.push(res.escalatedEffect);
@@ -587,7 +710,7 @@ class ModerationEngine {
         }
       }
 
-      // C) Anti-Links & Anti-Forwards
+      // D) Anti-Links & Anti-Forwards
       if (db.automod.antiLinksEnabled && !isVip) {
         const isForwardBlocked = db.automod.blockForwards && event.contentType === 'forward';
         const matchedUrls = event.text.match(URL_REGEX) ?? [];
@@ -602,6 +725,7 @@ class ModerationEngine {
         if (isForwardBlocked || hasDisallowedUrl) {
           deleteIncoming();
           db.stats.blockedSpamCount += 1;
+          this.recordAnalytics('blocked');
           const reason = isForwardBlocked ? 'Reenvío externo no permitido' : 'Enlace externo no autorizado';
           if (db.automod.linksAction === 'warn') {
             const res = this.applyWarn(event.source, member, reason, 'AutoMod · Anti-Links');
@@ -623,13 +747,14 @@ class ModerationEngine {
         }
       }
 
-      // D) Bad Words Filter
+      // E) Bad Words Filter
       if (db.automod.badWordsEnabled && db.automod.badWords.length > 0) {
         const lowerText = event.text.toLowerCase();
         const hit = db.automod.badWords.find((w) => w.trim().length > 0 && lowerText.includes(w.trim().toLowerCase()));
         if (hit) {
           deleteIncoming();
           db.stats.blockedSpamCount += 1;
+          this.recordAnalytics('blocked');
           const reason = `Uso de término prohibido ("${hit}")`;
           if (db.automod.badWordsAction === 'warn') {
             const res = this.applyWarn(event.source, member, reason, 'AutoMod · Filtro');
@@ -652,8 +777,24 @@ class ModerationEngine {
       }
     }
 
-    // 2. @admin report shorthand
+    // 2. Award chat XP & Coins for valid messages
+    const levelUpNotice = entertainmentEngine.awardChatActivity(member);
+    if (levelUpNotice) {
+      emitBotReply(levelUpNotice);
+    }
+
     const trimmed = event.text.trim();
+
+    // 3. Cooperative Hangman / Math Blitz guesses in chat
+    const activeGuess = entertainmentEngine.handleActiveChallengeGuess(member, trimmed);
+    if (activeGuess?.handled) {
+      if (activeGuess.playedGame) this.recordAnalytics('gamesPlayed');
+      if (activeGuess.replyText) emitBotReply(activeGuess.replyText);
+      await store.save();
+      return { effects, incomingMessage: simMsg };
+    }
+
+    // 4. @admin report shorthand
     if (trimmed.toLowerCase().includes('@admin')) {
       this.addLog(event.source, 'Alerta @admin', `@${member.username}`, 'Staff', trimmed.slice(0, 120), 'warning');
       emitBotReply(`Reporte recibido de @${member.username}. El equipo de administración ha sido notificado.`);
@@ -661,13 +802,13 @@ class ModerationEngine {
       return { effects, incomingMessage: simMsg };
     }
 
-    // 3. Built-in & Custom Commands
-    if (trimmed.startsWith('/') || trimmed.startsWith('!')) {
+    // 5. Built-in, Entertainment & Custom Commands
+    if (trimmed.startsWith('/') || trimmed.startsWith('!') || trimmed.toLowerCase().startsWith('+rep')) {
       const parts = trimmed.split(/\s+/);
       const rawCmd = parts[0].split('@')[0].toLowerCase();
       const args = parts.slice(1);
 
-      // Check custom commands first
+      // Custom commands first
       const custom = db.customCommands.find((c) => c.enabled && c.trigger.toLowerCase() === rawCmd);
       if (custom) {
         if (custom.adminOnly && !isAdmin) {
@@ -687,16 +828,37 @@ class ModerationEngine {
         return { effects, incomingMessage: simMsg };
       }
 
-      // Built-in commands
+      // Entertainment commands
+      const explicitTargetMember = event.targetUser ? this.ensureMember(event.targetUser) : null;
+      const entResult = entertainmentEngine.handleCommand(member, isAdmin, rawCmd, args, explicitTargetMember);
+      if (entResult.handled) {
+        if (entResult.playedGame) this.recordAnalytics('gamesPlayed');
+        if (entResult.auditAction) {
+          this.addLog(
+            event.source,
+            entResult.auditAction,
+            `@${member.username}`,
+            entResult.auditTarget ?? db.settings.groupName,
+            entResult.auditDetail ?? '',
+            'info'
+          );
+        }
+        if (entResult.replyText) {
+          emitBotReply(entResult.replyText, entResult.buttons);
+        }
+        await store.save();
+        return { effects, incomingMessage: simMsg };
+      }
+
+      // Moderation & Group Admin commands
       switch (rawCmd) {
         case '/start':
         case '/help': {
-          const memberCmds = '/rules · /info · /staff · /warns · /report <motivo>';
+          const memberCmds =
+            'Grupo: /rules · /info · /staff · /warns · /report\nEntretenimiento: /rank · /top · /daily · /misiones · /gracias @u · /shop · /buy · /cofre · /trivia · /ahorcado · /calculo · /dado · /ruleta · /ppt · /duelo · /lluvia · /encuesta · /8ball · /ship';
           const adminCmds =
-            '\nComandos Admin: /warn · /unwarn · /mute [min] · /unmute · /kick · /ban · /unban · /vip · /unvip · /lock <tipo> · /unlock <tipo> · /purge [N] · /pin <texto> · /unpin · /setrules · /setwelcome';
-          emitBotReply(
-            `CentinelaTG activo en ${db.settings.groupName}.\nComandos disponibles: ${memberCmds}${isAdmin ? adminCmds : ''}`
-          );
+            '\nAdmin: /warn · /unwarn · /mute · /unmute · /kick · /ban · /unban · /vip · /unvip · /lock · /unlock · /purge · /pin · /unpin · /setrules · /setwelcome · /raid on|off · /slowmode [seg] · /games on|off · /sorteo · /fin_sorteo';
+          emitBotReply(`CentinelaTG en ${db.settings.groupName}\n${memberCmds}${isAdmin ? adminCmds : ''}`);
           break;
         }
 
@@ -716,6 +878,7 @@ class ModerationEngine {
             break;
           }
           db.settings.rulesText = nextRules;
+          criticalChange = true;
           this.addLog(event.source, 'Normas actualizadas', `@${member.username}`, db.settings.groupName, nextRules.slice(0, 80), 'info');
           emitBotReply('Normas del grupo actualizadas correctamente.');
           break;
@@ -732,22 +895,68 @@ class ModerationEngine {
             break;
           }
           db.settings.welcomeMessage = nextWelcome;
+          criticalChange = true;
           this.addLog(event.source, 'Bienvenida actualizada', `@${member.username}`, db.settings.groupName, nextWelcome.slice(0, 80), 'info');
           emitBotReply('Mensaje de bienvenida actualizado.');
+          break;
+        }
+
+        case '/raid': {
+          if (!isAdmin) {
+            emitBotReply('Solo administradores.');
+            break;
+          }
+          const mode = (args[0] ?? '').toLowerCase();
+          if (mode !== 'on' && mode !== 'off') {
+            emitBotReply(`Modo Anti-Raid: ${db.security.raidModeActive ? 'ACTIVO' : 'Inactivo'}. Usa /raid on o /raid off.`);
+            break;
+          }
+          db.security.raidModeActive = mode === 'on';
+          if (mode === 'off' && db.security.raidAction === 'lock_all') {
+            db.automod.locks.all = false;
+          } else if (mode === 'on' && db.security.raidAction === 'lock_all') {
+            db.automod.locks.all = true;
+          }
+          criticalChange = true;
+          this.addLog(
+            event.source,
+            mode === 'on' ? 'Modo Anti-Raid activado' : 'Modo Anti-Raid desactivado',
+            `@${member.username}`,
+            db.settings.groupName,
+            'Control manual /raid',
+            mode === 'on' ? 'danger' : 'info'
+          );
+          emitBotReply(
+            mode === 'on'
+              ? 'Modo Anti-Raid ACTIVADO. Las solicitudes quedan retenidas para revisión manual.'
+              : 'Modo Anti-Raid desactivado. El grupo vuelve a su operación normal.'
+          );
+          break;
+        }
+
+        case '/slowmode': {
+          if (!isAdmin) {
+            emitBotReply('Solo administradores.');
+            break;
+          }
+          const secs = Math.max(0, Math.min(300, Number.parseInt(args[0] ?? '0', 10) || 0));
+          db.security.slowModeSec = secs;
+          criticalChange = true;
+          this.addLog(event.source, 'Modo lento ajustado', `@${member.username}`, db.settings.groupName, `${secs}s por mensaje`, 'info');
+          emitBotReply(secs === 0 ? 'Modo lento desactivado.' : `Modo lento fijado en ${secs} segundos entre mensajes.`);
           break;
         }
 
         case '/staff': {
           const admins = db.members.filter((m) => m.role === 'admin').map((m) => `@${m.username} (${m.name})`);
           const vips = db.members.filter((m) => m.role === 'vip').map((m) => `@${m.username}`);
-          emitBotReply(
-            `Administradores: ${admins.join(', ') || 'Sin asignar'}\nMiembros VIP: ${vips.join(', ') || 'Ninguno'}`
-          );
+          emitBotReply(`Administradores: ${admins.join(', ') || 'Sin asignar'}\nMiembros VIP: ${vips.join(', ') || 'Ninguno'}`);
           break;
         }
 
         case '/report': {
           const reason = args.join(' ').trim() || 'Solicitud de revisión en el grupo';
+          criticalChange = true;
           this.addLog(event.source, 'Reporte de miembro', `@${member.username}`, 'Administración', reason, 'warning');
           emitBotReply(`Reporte registrado por @${member.username}: "${reason}". Un administrador lo revisará pronto.`);
           break;
@@ -760,7 +969,7 @@ class ModerationEngine {
             break;
           }
           emitBotReply(
-            `Ficha de ${target.name} (@${target.username})\nID: ${target.id} · Rol: ${target.role.toUpperCase()} · Estado: ${target.status}\nAdvertencias: ${target.warns}/${db.automod.maxWarns} · Mensajes: ${target.messageCount}`
+            `Ficha de ${target.name} (@${target.username})\nID: ${target.id} · Rol: ${target.role.toUpperCase()} · Estado: ${target.status}\nNivel ${target.level} (${target.xp} XP) · ${db.entertainment.currencyName}: ${target.coins} · Rep: +${target.reputation}\nAdvertencias: ${target.warns}/${db.automod.maxWarns} · Mensajes: ${target.messageCount}`
           );
           break;
         }
@@ -800,6 +1009,7 @@ class ModerationEngine {
           const reason = (event.targetUser ? args : args.slice(1)).join(' ').trim() || 'Incumplimiento de normas';
           const res = this.applyWarn(event.source, target, reason, `@${member.username}`);
           if (res.escalatedEffect) effects.push(res.escalatedEffect);
+          criticalChange = true;
           emitBotReply(res.message);
           break;
         }
@@ -818,6 +1028,7 @@ class ModerationEngine {
             target.warns -= 1;
             target.warnHistory.shift();
           }
+          criticalChange = true;
           this.addLog(event.source, 'Advertencia retirada', `@${member.username}`, `@${target.username}`, `Quedan ${target.warns}/${db.automod.maxWarns}`, 'info');
           emitBotReply(`Se retiró 1 advertencia a @${target.username} (${target.warns}/${db.automod.maxWarns}).`);
           break;
@@ -842,6 +1053,7 @@ class ModerationEngine {
           target.status = 'muted';
           target.mutedUntil = new Date(Date.now() + mins * 60_000).toISOString();
           effects.push({ type: 'mute_user', targetUserId: target.id, durationMin: mins });
+          criticalChange = true;
           this.addLog(event.source, `Silencio manual (${mins}m)`, `@${member.username}`, `@${target.username}`, 'Aplicado por comando /mute', 'warning');
           emitBotReply(`@${target.username} silenciado durante ${mins} minutos.`);
           break;
@@ -860,6 +1072,7 @@ class ModerationEngine {
           target.status = 'verified';
           target.mutedUntil = null;
           effects.push({ type: 'unmute_user', targetUserId: target.id });
+          criticalChange = true;
           this.addLog(event.source, 'Silencio levantado', `@${member.username}`, `@${target.username}`, 'Permisos de escritura restaurados', 'info');
           emitBotReply(`@${target.username} ya puede volver a escribir en el grupo.`);
           break;
@@ -877,6 +1090,7 @@ class ModerationEngine {
           }
           target.status = 'kicked';
           effects.push({ type: 'kick_user', targetUserId: target.id });
+          criticalChange = true;
           this.addLog(event.source, 'Expulsión (/kick)', `@${member.username}`, `@${target.username}`, 'Expulsado del grupo privado', 'danger');
           emitBotReply(`@${target.username} fue expulsado del grupo.`);
           break;
@@ -895,6 +1109,7 @@ class ModerationEngine {
           const reason = (event.targetUser ? args : args.slice(1)).join(' ').trim() || 'Baneo administrativo';
           target.status = 'banned';
           effects.push({ type: 'ban_user', targetUserId: target.id });
+          criticalChange = true;
           this.addLog(event.source, 'Baneo (/ban)', `@${member.username}`, `@${target.username}`, reason, 'danger');
           emitBotReply(`@${target.username} ha sido baneado permanentemente. Motivo: ${reason}.`);
           break;
@@ -913,6 +1128,7 @@ class ModerationEngine {
           target.status = 'verified';
           target.mutedUntil = null;
           effects.push({ type: 'unban_user', targetUserId: target.id });
+          criticalChange = true;
           this.addLog(event.source, 'Desbaneo (/unban)', `@${member.username}`, `@${target.username}`, 'Restaurado en la lista de acceso', 'info');
           emitBotReply(`@${target.username} fue desbaneado y puede solicitar ingreso nuevamente.`);
           break;
@@ -931,6 +1147,7 @@ class ModerationEngine {
           }
           const makeVip = rawCmd === '/vip';
           target.role = makeVip ? 'vip' : 'member';
+          criticalChange = true;
           this.addLog(event.source, makeVip ? 'VIP asignado' : 'VIP retirado', `@${member.username}`, `@${target.username}`, `Rol actual: ${target.role}`, 'info');
           emitBotReply(`@${target.username} ahora tiene rol ${target.role.toUpperCase()}.`);
           break;
@@ -947,6 +1164,7 @@ class ModerationEngine {
           const validLocks: (keyof ContentLocks)[] = ['stickers', 'gifs', 'media', 'documents', 'voice', 'all'];
           if (targetType === 'links') {
             db.automod.antiLinksEnabled = lockState;
+            criticalChange = true;
             this.addLog(event.source, lockState ? 'Bloqueo de enlaces' : 'Desbloqueo de enlaces', `@${member.username}`, 'AutoMod', `antiLinks=${lockState}`, 'info');
             emitBotReply(`Anti-Links ${lockState ? 'activado' : 'desactivado'}.`);
             break;
@@ -956,6 +1174,7 @@ class ModerationEngine {
             break;
           }
           db.automod.locks[targetType as keyof ContentLocks] = lockState;
+          criticalChange = true;
           this.addLog(event.source, `${lockState ? 'Bloqueo' : 'Desbloqueo'} ${targetType}`, `@${member.username}`, 'AutoMod · Locks', `Estado: ${lockState}`, 'info');
           emitBotReply(`${lockState ? 'Bloqueado' : 'Desbloqueado'}: ${targetType}.`);
           break;
@@ -975,6 +1194,7 @@ class ModerationEngine {
               if (m.senderRole !== 'system') m.deleted = true;
             }
           }
+          criticalChange = true;
           this.addLog(event.source, `Limpieza (/purge ${count})`, `@${member.username}`, 'Chat', `Se limpiaron ${count} mensajes recientes`, 'info');
           emitBotReply(`Limpieza ejecutada (${count} mensajes).`);
           break;
@@ -1007,6 +1227,7 @@ class ModerationEngine {
           } else {
             emitBotReply(`Mensaje fijado: ${textToPin}`);
           }
+          criticalChange = true;
           this.addLog(event.source, 'Mensaje fijado (/pin)', `@${member.username}`, 'Chat', textToPin.slice(0, 80), 'info');
           break;
         }
@@ -1022,6 +1243,7 @@ class ModerationEngine {
               m.pinned = false;
             });
           }
+          criticalChange = true;
           this.addLog(event.source, 'Mensaje desfijado', `@${member.username}`, 'Chat', 'Anuncio retirado', 'info');
           emitBotReply('Se retiró el mensaje fijado.');
           break;
@@ -1033,7 +1255,11 @@ class ModerationEngine {
       }
     }
 
-    await store.save();
+    if (criticalChange || event.source === 'simulator') {
+      await store.save();
+    } else {
+      store.scheduleSave();
+    }
     return { effects, incomingMessage: simMsg };
   }
 

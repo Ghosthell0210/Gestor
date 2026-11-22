@@ -2,6 +2,7 @@ import { Bot, InlineKeyboard } from 'grammy';
 import type { Context } from 'grammy';
 import { botEngine, escapeHtml } from './engine.ts';
 import type { BotEffect } from './engine.ts';
+import { entertainmentEngine } from './entertainment.ts';
 import { store } from './storage.ts';
 import type { BotRuntimeInfo, MessageContentType } from '../shared/types.ts';
 
@@ -47,7 +48,7 @@ class TelegramLongPollingAdapter {
   private botUsername: string | null = null;
   private telegramConnected = false;
   private lastError: string | null = null;
-  private announcementTimer: NodeJS.Timeout | null = null;
+  private backgroundTimer: NodeJS.Timeout | null = null;
 
   getRuntimeInfo(): BotRuntimeInfo {
     const adminIds = parseAdminIds();
@@ -132,7 +133,7 @@ class TelegramLongPollingAdapter {
 
   async start(): Promise<void> {
     const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-    this.startAnnouncementLoop();
+    this.startBackgroundLoop();
 
     if (!token) {
       this.telegramConnected = false;
@@ -277,17 +278,33 @@ class TelegramLongPollingAdapter {
     }
   }
 
-  private startAnnouncementLoop() {
-    if (this.announcementTimer) clearInterval(this.announcementTimer);
+  private startBackgroundLoop() {
+    if (this.backgroundTimer) clearInterval(this.backgroundTimer);
     let lastPostedAt = Date.now();
-    this.announcementTimer = setInterval(async () => {
+    this.backgroundTimer = setInterval(async () => {
       try {
         const db = store.get();
+        const groupId = process.env.GROUP_CHAT_ID?.trim();
+
+        // Check expired giveaways
+        const nowMs = Date.now();
+        let changed = false;
+        for (const g of db.entertainment.activeGiveaways) {
+          if (g.status === 'active' && new Date(g.endsAt).getTime() <= nowMs) {
+            const msg = entertainmentEngine.closeGiveaway(g.id);
+            changed = true;
+            if (this.bot && this.telegramConnected && groupId) {
+              await this.bot.api.sendMessage(Number(groupId), escapeHtml(msg), { parse_mode: 'HTML' }).catch(() => undefined);
+            }
+          }
+        }
+        if (changed) await store.save();
+
+        // Scheduled announcement
         if (!db.settings.scheduledAnnouncementEnabled) return;
         const intervalMs = Math.max(15, db.settings.scheduledAnnouncementIntervalMin) * 60_000;
-        if (Date.now() - lastPostedAt < intervalMs) return;
-        lastPostedAt = Date.now();
-        const groupId = process.env.GROUP_CHAT_ID?.trim();
+        if (nowMs - lastPostedAt < intervalMs) return;
+        lastPostedAt = nowMs;
         if (this.bot && this.telegramConnected && groupId) {
           await this.bot.api
             .sendMessage(Number(groupId), escapeHtml(db.settings.scheduledAnnouncementText), {
@@ -299,13 +316,15 @@ class TelegramLongPollingAdapter {
         // Ignore transient timer errors
       }
     }, 60_000);
+    this.backgroundTimer.unref();
   }
 
   async stop(): Promise<void> {
-    if (this.announcementTimer) clearInterval(this.announcementTimer);
+    if (this.backgroundTimer) clearInterval(this.backgroundTimer);
     if (this.bot) {
       await this.bot.stop().catch(() => undefined);
     }
+    await store.flushPending();
   }
 }
 

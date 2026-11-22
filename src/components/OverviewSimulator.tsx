@@ -11,6 +11,7 @@ import {
   Trash2,
   CheckCircle2,
   AlertTriangle,
+  Siren,
 } from 'lucide-react';
 import type {
   BotDatabase,
@@ -25,6 +26,7 @@ interface OverviewSimulatorProps {
   onSimulateJoin: (name: string, username: string) => Promise<void>;
   onCallbackClick: (actorId: string, callbackData: string) => Promise<void>;
   onResetSimulator: () => Promise<void>;
+  onDisableRaidMode: () => Promise<void>;
 }
 
 const CONTENT_TYPES: { value: MessageContentType; label: string }[] = [
@@ -40,11 +42,14 @@ const CONTENT_TYPES: { value: MessageContentType; label: string }[] = [
 const QUICK_COMMANDS = [
   '/help',
   '/rules',
-  '/info @msilva92',
-  '/warn @msilva92 Spam en chat',
-  '/lock links',
-  '/unlock links',
-  '/purge 3',
+  '/daily',
+  '/trivia',
+  '/ahorcado',
+  '/calculo',
+  '/shop',
+  '/lluvia 100 4',
+  '/sorteo 5 1 Pase VIP',
+  '/encuesta ¿Evento hoy? | Sí | Mañana',
 ];
 
 export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
@@ -54,6 +59,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
   onSimulateJoin,
   onCallbackClick,
   onResetSimulator,
+  onDisableRaidMode,
 }) => {
   const [actorId, setActorId] = useState<string>(db.members[0]?.id ?? '1001001');
   const [text, setText] = useState('');
@@ -77,9 +83,6 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
 
   const activeActor = db.members.find((m) => m.id === actorId) ?? db.members[0];
   const verifiedCount = db.members.filter((m) => m.status === 'verified').length;
-  const sanctionedCount = db.members.filter(
-    (m) => m.status === 'muted' || m.status === 'banned' || m.status === 'kicked'
-  ).length;
   const pinnedMsg = [...db.simulatorMessages].reverse().find((m) => m.pinned && !m.deleted);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -112,6 +115,20 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
     }
   };
 
+  const handleTriggerRaid = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const count = db.security.raidJoinThreshold;
+      for (let i = 1; i <= count; i++) {
+        const suffix = Math.floor(Math.random() * 900 + 100);
+        await onSimulateJoin(`Bot Raid ${i}`, `raid_usr_${suffix}`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleTriggerSpamLink = async () => {
     const testUser = db.members.find((m) => m.role === 'member' && m.status === 'verified') ?? activeActor;
     if (!testUser || busy) return;
@@ -136,7 +153,25 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* KPI Strip: flat single-elevation container with hairline column dividers */}
+      {db.security.raidModeActive && (
+        <div className="bg-rose-50 border border-rose-200 rounded-lg px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5 text-sm font-medium text-rose-900">
+            <Siren className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>
+              Modo Emergencia Anti-Raid ACTIVO · Los nuevos ingresos se retienen para revisión manual.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onDisableRaidMode}
+            className="px-3.5 py-1.5 text-xs font-medium text-rose-800 bg-white border border-rose-300 hover:bg-rose-100 rounded-md whitespace-nowrap"
+          >
+            Desactivar emergencia
+          </button>
+        </div>
+      )}
+
+      {/* KPI Strip */}
       <section
         aria-label="Indicadores del grupo"
         className="grid grid-cols-2 lg:grid-cols-4 bg-white border border-slate-200 rounded-lg divide-y lg:divide-y-0 lg:divide-x divide-slate-200"
@@ -154,25 +189,25 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
         </div>
 
         <div className="p-5">
-          <div className="text-xs font-medium text-slate-500">Spam y bloqueos</div>
+          <div className="text-xs font-medium text-slate-500">Spam y raids bloqueados</div>
           <div className="mt-1.5 flex items-baseline justify-between">
             <span className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
               {db.stats.blockedSpamCount}
             </span>
             <span className="text-xs text-slate-500 font-mono tabular-nums">
-              {db.stats.totalMessagesProcessed} procesados
+              {db.stats.raidsBlocked} raids · {db.stats.totalWarningsIssued} warns
             </span>
           </div>
         </div>
 
         <div className="p-5">
-          <div className="text-xs font-medium text-slate-500">Advertencias y sanciones</div>
+          <div className="text-xs font-medium text-slate-500">Partidas y eventos</div>
           <div className="mt-1.5 flex items-baseline justify-between">
             <span className="text-2xl font-semibold text-slate-900 font-mono tabular-nums">
-              {db.stats.totalWarningsIssued}
+              {db.stats.totalGamesPlayed}
             </span>
-            <span className="text-xs text-amber-700 font-medium font-mono tabular-nums">
-              {sanctionedCount} restringidos
+            <span className="text-xs text-slate-600 font-mono tabular-nums">
+              {db.entertainment.gamesEnabled ? `Cooldown ${db.entertainment.gameCooldownSec}s` : 'Juegos pausados'}
             </span>
           </div>
         </div>
@@ -197,14 +232,12 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
             )}
           </div>
           <div className="mt-1 text-xs text-slate-500">
-            {runtime.telegramConnected
-              ? 'Conectado en tiempo real con Telegram'
-              : 'Configura TELEGRAM_BOT_TOKEN para modo vivo'}
+            Slow Mode: {db.security.slowModeSec}s · Captcha: {db.settings.captchaMode}
           </div>
         </div>
       </section>
 
-      {/* Main Split: Interactive Telegram Group Simulator (Left) + Test Controls (Right) */}
+      {/* Main Split */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Simulator Window */}
         <section className="xl:col-span-8 bg-white border border-slate-200 rounded-lg overflow-hidden flex flex-col">
@@ -214,7 +247,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
                 {db.settings.groupName}
               </h2>
               <p className="text-xs text-slate-500">
-                Simulador de grupo privado · Captcha: {db.settings.captchaMode} · Máx. warns: {db.automod.maxWarns}
+                Simulador completo · Moderación + Entretenimiento ({db.entertainment.currencyName})
               </p>
             </div>
             <button
@@ -235,7 +268,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
             </div>
           )}
 
-          <div className="h-[440px] overflow-y-auto p-5 space-y-3 bg-slate-50/40">
+          <div className="h-[460px] overflow-y-auto p-5 space-y-3 bg-slate-50/40">
             {db.simulatorMessages.map((msg) => {
               if (msg.senderRole === 'system') {
                 return (
@@ -325,7 +358,6 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
             <div ref={feedEndRef} />
           </div>
 
-          {/* Composer */}
           <form onSubmit={handleSubmit} className="p-4 border-t border-slate-200 bg-white space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <label className="text-xs font-medium text-slate-600 shrink-0" htmlFor="sim-actor">
@@ -339,7 +371,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
               >
                 {db.members.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.name} (@{m.username}) · {m.role.toUpperCase()} · {m.status}
+                    {m.name} (@{m.username}) · {m.role.toUpperCase()} · Nv.{m.level} · {m.coins} {db.entertainment.currencyName}
                   </option>
                 ))}
               </select>
@@ -363,7 +395,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
                 type="text"
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                placeholder="Escribe un mensaje o comando (/rules, /warn @msilva92, /lock stickers)..."
+                placeholder="Escribe un mensaje, comando (/trivia, /ahorcado, /daily, /shop, /warn) o letra..."
                 className="flex-1 min-w-0 text-sm border border-slate-200 rounded-md px-3.5 py-2 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <button
@@ -392,7 +424,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
           </form>
         </section>
 
-        {/* Right Column: Simulated Scenarios & Join Request Tester */}
+        {/* Right Column */}
         <aside className="xl:col-span-4 space-y-6">
           <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
             <div>
@@ -411,7 +443,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
                   type="text"
                   value={joinName}
                   onChange={(e) => setJoinName(e.target.value)}
-                  className="w-full text-sm border border-slate-200 rounded-md px-3 py-1.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  className="w-full text-sm border border-slate-200 rounded-md px-3 py-1.5 text-slate-900"
                 />
               </div>
               <div>
@@ -423,7 +455,7 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
                   type="text"
                   value={joinUsername}
                   onChange={(e) => setJoinUsername(e.target.value)}
-                  className="w-full text-sm font-mono border border-slate-200 rounded-md px-3 py-1.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  className="w-full text-sm font-mono border border-slate-200 rounded-md px-3 py-1.5 text-slate-900"
                 />
               </div>
               <button
@@ -439,12 +471,25 @@ export const OverviewSimulator: React.FC<OverviewSimulatorProps> = ({
 
           <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-3">
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">Pruebas automáticas de ataque</h3>
+              <h3 className="text-sm font-semibold text-slate-900">Pruebas de defensa y estrés</h3>
               <p className="mt-1 text-xs text-slate-500">
-                Dispara escenarios reales para verificar cómo responde AutoMod con tu configuración actual.
+                Verifica Anti-Raid, Anti-Flood, Anti-Links y filtro de palabras en tiempo real.
               </p>
             </div>
             <div className="space-y-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleTriggerRaid}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-medium text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition-colors"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Siren className="w-4 h-4 text-rose-600" />
+                  Simular ataque Raid ({db.security.raidJoinThreshold} ingresos)
+                </span>
+                <span className="font-mono text-rose-600">Ejecutar</span>
+              </button>
+
               <button
                 type="button"
                 disabled={busy}
